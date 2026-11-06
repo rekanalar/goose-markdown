@@ -16,7 +16,7 @@ Pure Goose, no C.
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v0.1.0";
+import markdown from "rekanalar/goose-markdown@v0.1.1";
 ```
 
 ## API
