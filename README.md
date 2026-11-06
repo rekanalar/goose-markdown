@@ -1,5 +1,7 @@
 # goose-markdown
 
+[![ci](https://github.com/rekanalar/goose-markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/rekanalar/goose-markdown/actions/workflows/ci.yml)
+
 Markdown rendering to HTML for the Goose programming language. The
 constructs are the CommonMark core.
 
