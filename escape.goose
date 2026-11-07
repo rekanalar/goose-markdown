@@ -1,7 +1,8 @@
 // The HTML escapers for the markdown package.
 //
-// These functions are the only writers of raw input bytes in the
-// package. Every other unit sends its text through one of them.
+// These functions escape the text and the attribute values of the
+// input. The HTML blocks and the raw tags of the input do not go
+// through them. Those go out as they stand, as CommonMark wants.
 namespace markdown;
 
 import std;

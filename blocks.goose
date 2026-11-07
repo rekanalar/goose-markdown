@@ -423,6 +423,31 @@ fn render_lines(out: u8[>..]&, lines: const u8[:][>..]&, skip: bool[>..]&, ids: 
             if closed { i += 1; }
             continue;
         }
+        // An HTML block: the lines go out raw, as they stand. A kind 1
+        // to 5 block ends at the line that meets its end condition. A
+        // kind 6 or 7 block ends at a blank line, which stays out.
+        let bkind = if o.escape_html { 0 } else { html_block_kind(line) };
+        if bkind > 0 {
+            var k = i;
+            var last = to - 1;
+            if bkind <= 5 {
+                while k < to {
+                    if html_block_end(bkind, lines[k]) { last = k; break; }
+                    k += 1;
+                }
+            } else {
+                while k < to && !is_blank(lines[k]) { k += 1; }
+                last = k - 1;
+            }
+            var m = i;
+            while m <= last {
+                out.append(lines[m]);
+                out.append("\n");
+                m += 1;
+            }
+            i = last + 1;
+            continue;
+        }
         if is_hr(line) && setext_level(line) == 0 || (is_hr(line) && leading_spaces(line) < 4) {
             if leading_spaces(line) < 4 {
                 out.append("<hr />\n");
@@ -600,6 +625,12 @@ fn render_lines(out: u8[>..]&, lines: const u8[:][>..]&, skip: bool[>..]&, ids: 
                 if is_quote(pl) { break; }
                 let mk, ms = list_marker(pl);
                 if mk > 0 { break; }
+                // A kind 1 to 6 block interrupts a paragraph. A kind 7
+                // block does not.
+                if !o.escape_html {
+                    let hk = html_block_kind(pl);
+                    if hk >= 1 && hk <= 6 { break; }
+                }
             }
             if para.len > 0 { para.push('\n'); }
             para.append(if j > i { trim_start(pl) } else { trim_start(pl) });

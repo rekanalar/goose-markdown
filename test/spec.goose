@@ -1,6 +1,6 @@
 // Runs the CommonMark 0.31.2 examples of test/spec.json and prints the
 // count of passes. Run with: goose run test/spec.goose [-v]
-// The count is a report with a floor of 380. The renderer does not claim
+// The count is a report with a floor of 453. The renderer does not claim
 // full CommonMark. test/run.goose holds the gate.
 
 import std;
@@ -30,6 +30,7 @@ fn main() {
     print("passed ", pass, " of ", total, "\n");
     print("failing: ", fails[..], "\n");
     // The floor guards against a fall back. Raise it when the count rises.
-    if pass < 380 { return 1; }
+    // 453 as of the HTML blocks and raw HTML work of this cycle.
+    if pass < 453 { return 1; }
     return 0;
 }

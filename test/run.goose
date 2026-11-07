@@ -93,8 +93,9 @@ fn test_hard_break() {
 }
 
 fn test_escapes() {
-    expect_render("a <b> c & d", "<p>a &lt;b&gt; c &amp; d</p>\n");
-    expect_render("<script>x</script>", "<p>&lt;script&gt;x&lt;/script&gt;</p>\n");
+    // Text that only looks like a tag goes out escaped.
+    expect_render("a <33> c & d", "<p>a &lt;33&gt; c &amp; d</p>\n");
+    expect_render("x < y", "<p>x &lt; y</p>\n");
 }
 
 fn test_url_escape() {
@@ -108,19 +109,12 @@ fn test_windows_endings() {
     expect_render("# T\r\n\r\ntext", "<h1>T</h1>\n<p>text</p>\n");
 }
 
-fn test_no_raw_lt() {
-    // A hostile document renders with no raw '<' outside code spans.
-    var out: u8[>..] = [];
-    markdown::render(out, "<script>alert(1)</script>\n\n[x](j\" onmouseover=\"a)\n\n<img src=x>");
-    var raw: i64 = 0;
-    for c in out {
-        if c == '<' { raw += 1; }
-    }
-    // Only the tags the renderer itself wrote may hold '<'. The link has
-    // no valid form, so the input gives three <p></p> pairs.
-    assert(raw == 6);
-    assert(find(out[..], "<script") < 0);
-    assert(find(out[..], "<img") < 0);
+fn test_raw_html_policy() {
+    // Raw HTML goes out as it stands, as CommonMark wants. A caller
+    // that renders untrusted input must sanitize the output itself.
+    expect_render("<script>alert(1)</script>\n\n<b>bold</b>", "<script>alert(1)</script>\n<p><b>bold</b></p>\n");
+    // Text that only looks like a tag still goes out escaped.
+    expect_render("<33 <b c=1>", "<p>&lt;33 <b c=1></p>\n");
 }
 
 fn test_large_document() {
@@ -234,10 +228,71 @@ fn test_smart() {
 }
 
 fn test_all_on() {
-    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true };
+    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true };
     var out: u8[>..] = [];
     assert(markdown::render_with(out, "# T\n\n~~a~~ www.x.org[^1]\n\n[^1]: n", o));
     assert(out.len > 0);
+}
+
+fn test_html_block() {
+    // Kind 6: a tag of the list of the spec. It interrupts a paragraph.
+    expect_render("Foo\n<div>\nbar\n</div>", "<p>Foo</p>\n<div>\nbar\n</div>\n");
+    // Kind 1: a raw text tag. The end condition is a line with the end tag.
+    expect_render("<script>\n// js\n</script>\nokay", "<script>\n// js\n</script>\n<p>okay</p>\n");
+    // Kind 2: a comment. It ends at -->, and the lines go out as they stand.
+    expect_render("<!-- Foo\n\nbar\n   baz -->\nokay", "<!-- Foo\n\nbar\n   baz -->\n<p>okay</p>\n");
+    // Kind 3: a processing instruction.
+    expect_render("<?php\n  echo '>';\n?>\nokay", "<?php\n  echo '>';\n?>\n<p>okay</p>\n");
+    // Kind 4: a declaration.
+    expect_render("<!DOCTYPE html>", "<!DOCTYPE html>\n");
+    // Kind 5: a CDATA section.
+    expect_render("<![CDATA[\n>&<\n]]>\n", "<![CDATA[\n>&<\n]]>\n");
+    // Kind 7: a whole tag alone on the line. It runs to the blank line.
+    expect_render("<a href=\"foo\">\n*bar*\n</a>", "<a href=\"foo\">\n*bar*\n</a>\n");
+    // A kind 7 block does not interrupt a paragraph.
+    expect_render("Foo\n<a href=\"bar\">\nbaz", "<p>Foo\n<a href=\"bar\">\nbaz</p>\n");
+    // Three spaces of indentation still start a block. Four start code.
+    expect_render("  <!-- foo -->\n\n    <!-- foo -->", "  <!-- foo -->\n<pre><code>&lt;!-- foo --&gt;\n</code></pre>\n");
+    // A first line that meets both conditions holds that line alone.
+    expect_render("<!-- foo -->*bar*\n*baz*", "<!-- foo -->*bar*\n<p><em>baz</em></p>\n");
+}
+
+fn test_raw_html() {
+    // Open tags go out raw.
+    expect_render("<a><bab><c2c>", "<p><a><bab><c2c></p>\n");
+    expect_render("<a/><b2/>", "<p><a/><b2/></p>\n");
+    // A tag may span a line end.
+    expect_render("<a  /><b2\ndata=\"foo\" >", "<p><a  /><b2\ndata=\"foo\" ></p>\n");
+    // Closing tags go out raw, with optional spaces before >.
+    expect_render("</a></foo >", "<p></a></foo ></p>\n");
+    // A closing tag holds no attributes.
+    expect_render("</a href=\"foo\">", "<p>&lt;/a href=&quot;foo&quot;&gt;</p>\n");
+    // The short comment forms of the spec.
+    expect_render("foo <!--> foo -->", "<p>foo <!--> foo --&gt;</p>\n");
+    expect_render("foo <!---> foo -->", "<p>foo <!---> foo --&gt;</p>\n");
+    // A processing instruction, a declaration and a CDATA section.
+    expect_render("foo <?php echo $a; ?>", "<p>foo <?php echo $a; ?></p>\n");
+    expect_render("foo <!ELEMENT br EMPTY>", "<p>foo <!ELEMENT br EMPTY></p>\n");
+    expect_render("foo <![CDATA[>&<]]>", "<p>foo <![CDATA[>&<]]></p>\n");
+    // Text that only looks like a tag goes out escaped.
+    expect_render("<33> <__>", "<p>&lt;33&gt; &lt;__&gt;</p>\n");
+    expect_render("<a href=\"\\\"\">", "<p>&lt;a href=&quot;&quot;&quot;&gt;</p>\n");
+    // A tag binds more tightly than emphasis.
+    expect_render("<del>*foo*</del>", "<p><del><em>foo</em></del></p>\n");
+    expect_render("*<img src=\"foo\" title=\"*\"/>", "<p>*<img src=\"foo\" title=\"*\"/></p>\n");
+    // A tag hides a closing marker from the strikethrough scan.
+    expect_with("~~<em title=\"~~\">x~~", markdown::Options { strikethrough: true, .. }, "<p><del><em title=\"~~\">x</del></p>\n");
+    // An autolink hides a ] from the link scan.
+    expect_render("[a <http://x/]>](u)", "<p><a href=\"u\">a <a href=\"http://x/]\">http://x/]</a></a></p>\n");
+}
+
+fn test_escape_html_option() {
+    // The option turns the raw HTML of the input back into escaped text.
+    expect_with("<b>bold</b>", markdown::Options { escape_html: true, .. }, "<p>&lt;b&gt;bold&lt;/b&gt;</p>\n");
+    expect_with("<div>\n*hi*\n</div>", markdown::Options { escape_html: true, .. }, "<p>&lt;div&gt;\n<em>hi</em>\n&lt;/div&gt;</p>\n");
+    expect_with("<!-- c -->", markdown::Options { escape_html: true, .. }, "<p>&lt;!-- c --&gt;</p>\n");
+    // The option leaves the rest of the renderer alone.
+    expect_with("# T\n\n*a*", markdown::Options { escape_html: true, .. }, "<h1>T</h1>\n<p><em>a</em></p>\n");
 }
 
 fn main() {
@@ -256,7 +311,7 @@ fn main() {
     test_escapes();
     test_url_escape();
     test_windows_endings();
-    test_no_raw_lt();
+    test_raw_html_policy();
     test_large_document();
     test_setext_and_indent();
     test_short_blank_in_code();
@@ -271,6 +326,9 @@ fn main() {
     test_footnotes();
     test_smart();
     test_all_on();
+    test_html_block();
+    test_raw_html();
+    test_escape_html_option();
     print("all tests passed");
     return 0;
 }

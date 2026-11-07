@@ -3,8 +3,9 @@
 // The package renders CommonMark-core Markdown to HTML in one pass:
 // headings, paragraphs, code blocks, blockquotes, lists, thematic
 // breaks, emphasis, strong, inline code, links, images and hard line
-// breaks. Every text and attribute the input holds comes out escaped,
-// so the output holds no raw HTML from the input.
+// breaks. Text and attribute values come out escaped. The HTML of the
+// input comes out raw, as CommonMark wants. A caller that renders
+// untrusted input must sanitize the output itself.
 //
 // The repository is goose-markdown. The import name is "markdown".
 namespace markdown;
@@ -13,6 +14,8 @@ import std;
 import escape;
 import inline;
 import types;
+import htmlblock;
+import htmltag;
 import blocks;
 
 // render writes the HTML of the Markdown text into out, with every

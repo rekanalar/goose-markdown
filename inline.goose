@@ -58,6 +58,15 @@ fn find_def(st: State&, label: const u8[:], foot: bool) -> i64 {
     return -1;
 }
 
+// raw_lt_len gives the length of the raw tag or the autolink that starts
+// at j, or 0. The tag rule comes first. Scans use it to hide the markers
+// inside such a span.
+fn raw_lt_len(s: const u8[:], j: i64) -> i64 {
+    let tl = html_tag_len(s, j);
+    if tl > 0 { return tl; }
+    return autolink_len(s, j);
+}
+
 // find_close gives the place of the ] that closes the [ before from.
 // Nested pairs and backslash escapes count. A fault gives -1.
 fn find_close(s: const u8[:], from: i64) -> i64 {
@@ -66,6 +75,11 @@ fn find_close(s: const u8[:], from: i64) -> i64 {
     while j < s.len {
         let c = s[j];
         if c == '\\' { j += 2; continue; }
+        // A raw tag hides its brackets, so a ] inside it does not close.
+        if c == '<' {
+            let tl = raw_lt_len(s, j);
+            if tl > 0 { j += tl; continue; }
+        }
         if c == '[' { depth += 1; }
         if c == ']' {
             if depth == 0 { return j; }
@@ -200,6 +214,34 @@ fn scheme_len(s: const u8[:]) -> i64 {
         if !(is_alnum(c) || c == '+' || c == '.' || c == '-') { return 0; }
         i += 1;
     }
+    return 0;
+}
+
+// autolink_len gives the length of the `<...>` autolink at i: an address
+// with a scheme or an address with `@`. It gives 0 when no autolink
+// starts there. The text between `<` and `>` holds no spaces and no
+// second `<`.
+fn autolink_len(s: const u8[:], i: i64) -> i64 {
+    if i < 0 || i >= s.len || s[i] != '<' { return 0; }
+    // The text of an autolink holds no space and no second '<'. The
+    // scan stops at the first '<' or line end, so it never runs over
+    // the whole text.
+    var close: i64 = -1;
+    var k = i + 1;
+    while k < s.len {
+        let c = s[k];
+        if c == '>' { close = k; break; }
+        if c == '<' || c == '\n' || c == '\r' { break; }
+        k += 1;
+    }
+    if close <= i + 1 { return 0; }
+    let inner = s[i + 1..close];
+    var plain = true;
+    for x in inner { if x <= ' ' || x == '<' { plain = false; } }
+    if !plain { return 0; }
+    if scheme_len(inner) > 0 { return close + 1 - i; }
+    let at = find_char(inner, 0, '@');
+    if at > 0 && at + 1 < inner.len { return close + 1 - i; }
     return 0;
 }
 
@@ -385,6 +427,12 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
                         continue;
                     }
                     if s[j] == '\\' { j += 2; continue; }
+                    // A raw tag or an autolink binds more tightly than
+                    // emphasis, so its markers hide.
+                    if s[j] == '<' {
+                        let hl = raw_lt_len(s, j);
+                        if hl > 0 { j += hl; continue; }
+                    }
                     if s[j] != c { j += 1; continue; }
                     var e = j;
                     while e < s.len && s[e] == c { e += 1; }
@@ -422,6 +470,10 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
             var j = i + 2;
             var found: i64 = -1;
             while j + 1 < s.len {
+                if s[j] == '<' {
+                    let hl = raw_lt_len(s, j);
+                    if hl > 0 { j += hl; continue; }
+                }
                 if s[j] == '~' && s[j + 1] == '~' && !is_space(s[j - 1])
                    && !(j + 2 < s.len && s[j + 2] == '~') { found = j; break; }
                 j += 1;
@@ -437,31 +489,28 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
                 i += 2;
             }
         } else if c == '<' {
-            let close = find_char(s, i + 1, '>');
-            var done = false;
-            if close > i + 1 {
-                let inner = s[i + 1..close];
-                var plain = true;
-                for x in inner { if x <= ' ' || x == '<' { plain = false; } }
-                if plain {
-                    let sl = scheme_len(inner);
-                    let at = find_char(inner, 0, '@');
-                    if sl > 0 {
-                        emit_text(out, s, text_start, i, o.smart);
-                        emit_open(out, inner, "");
-                        escape_text(out, inner);
-                        out.append("</a>");
-                        done = true;
-                    } else if at > 0 && at + 1 < inner.len {
-                        emit_text(out, s, text_start, i, o.smart);
-                        emit_open(out, str("mailto:", inner), "");
-                        escape_text(out, inner);
-                        out.append("</a>");
-                        done = true;
-                    }
-                }
+            // A raw tag goes out as it stands. The rule runs before the
+            // autolink rule; the two forms never overlap.
+            let tl = if o.escape_html { 0 } else { html_tag_len(s, i) };
+            if tl > 0 {
+                emit_text(out, s, text_start, i, o.smart);
+                out.append(s[i..i + tl]);
+                i += tl;
+                text_start = i;
+                continue;
             }
-            if done {
+            let al = autolink_len(s, i);
+            if al > 0 {
+                let close = i + al - 1;
+                let inner = s[i + 1..close];
+                emit_text(out, s, text_start, i, o.smart);
+                if scheme_len(inner) > 0 {
+                    emit_open(out, inner, "");
+                } else {
+                    emit_open(out, str("mailto:", inner), "");
+                }
+                escape_text(out, inner);
+                out.append("</a>");
                 i = close + 1;
                 text_start = i;
             } else {

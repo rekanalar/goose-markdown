@@ -21,6 +21,8 @@ struct Options {
     footnotes: bool,
     // Turn quotes, -- , --- and ... into typographic characters.
     smart: bool,
+    // Escape the raw HTML of the input instead of writing it out.
+    escape_html: bool,
 }
 
 // Def holds a link reference definition or a footnote definition. The

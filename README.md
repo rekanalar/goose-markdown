@@ -10,15 +10,17 @@ blockquotes, flat lists and thematic breaks. It renders emphasis,
 strong, inline code, links with titles, reference links, images,
 `<url>` autolinks, backslash escapes and hard line breaks. The output
 follows the HTML of `cmark`, with `<hr />`, `<br />` and `<img ... />`.
-Every text and attribute the input holds comes out escaped, so the
-output holds no raw HTML from the input. Pure Goose, no C.
+
+It renders the seven HTML block kinds and the raw HTML of a paragraph
+as CommonMark wants. The bytes go out as they stand.
+Text that only looks like a tag still comes out escaped. Pure Goose, no C.
 
 ## Install
 
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v0.2.0";
+import markdown from "rekanalar/goose-markdown@v0.3.0";
 ```
 
 ## API
@@ -28,7 +30,7 @@ import markdown from "rekanalar/goose-markdown@v0.2.0";
 | `render(out, s)` | writes the HTML of the text into the buffer of the caller, with every extension off; always returns true |
 | `render_with(out, s, options)` | the same, with the extensions that `options` switches on |
 
-`Options` holds seven flags. Each is false by default.
+`Options` holds eight flags. Each is false by default.
 
 | Flag | Extension | Same as |
 |---|---|---|
@@ -39,6 +41,7 @@ import markdown from "rekanalar/goose-markdown@v0.2.0";
 | `tables` | pipe tables, with column alignment | `ENABLE_TABLES` |
 | `footnotes` | `[^label]` and `[^label]: text` | `ENABLE_FOOTNOTES` |
 | `smart` | curly quotes, `--` as en dash, `---` as em dash, `...` as an ellipsis | `ENABLE_SMART_PUNCTUATION` |
+| `escape_html` | escape the raw HTML of the input instead of writing it out | cmark `CMARK_OPT_SAFE`, goldmark without `html.WithUnsafe`, `markdown-it` with `html: false` |
 
 ```goose
 var out: u8[>..] = [];
@@ -48,13 +51,27 @@ print(out);  // <h1 id="title">Title</h1>
 
 The renderer never fails on content. Every input renders to some output.
 
+## Changes in v0.3.0
+
+- Before: raw HTML came out escaped. `<b>` gave `&lt;b&gt;`.
+  Now: the six forms of a tag and the seven HTML block kinds come out
+  raw. This breaks callers that relied on the escape.
+- Before: `<div>` started a paragraph. Now: it starts an HTML block.
+- New: a tag binds more tightly than emphasis and links.
+- New: the flag `escape_html` escapes the raw HTML of the input.
+
 ## Limits
 
 The renderer does not pass the whole CommonMark suite. Of the 652
-examples of CommonMark 0.31.2, 383 pass (`test/spec.goose`). These parts
+examples of CommonMark 0.31.2, 453 pass (`test/spec.goose`). These parts
 are open:
 
-- Raw HTML in the input renders as escaped text. No HTML block passes.
+- An HTML block inside a block quote or a list item renders as text.
+  Examples 174 and 175 of the suite stay open.
+- Raw HTML from the input goes out raw. That is what CommonMark wants.
+  The flag `escape_html` turns the raw HTML back into escaped text.
+  A caller that renders untrusted input should set it, or sanitize the
+  output itself.
 - Entity and numeric references (`&copy;`, `&#42;`) are not decoded.
 - Lists do not nest. An item holds one paragraph of text. Loose lists
   and a list inside a quote do not work.
@@ -76,6 +93,7 @@ goose run test/run.goose
 goose run test/spec.goose
 goose run examples/render.goose
 goose run examples/extensions.goose
+goose run examples/html.goose
 ```
 
 ## License

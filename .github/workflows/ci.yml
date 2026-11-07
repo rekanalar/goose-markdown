@@ -55,6 +55,16 @@ jobs:
         env:
           GOOSE_HOME: ${{ runner.temp }}/goose-home
 
+      - name: Run the examples
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          for f in examples/*.goose; do
+            goose run "$f" > /dev/null
+          done
+        env:
+          GOOSE_HOME: ${{ runner.temp }}/goose-home
+
       - name: Report the failure
         if: failure()
         run: |
