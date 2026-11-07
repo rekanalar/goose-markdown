@@ -38,7 +38,7 @@ fn escape_url(out: u8[>..]&, s: const u8[:]) {
         if c == '&' {
             out.append("&amp;");
         } else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-            || "-_.~!*();:@=+$,/?#[]%".find_char_in(c) {
+            || "-_.~!*();:@=+$,/?#%".find_char_in(c) {
             out.push(c);
         } else {
             out.push('%');

@@ -4,11 +4,19 @@
 // emphasis, strong, links, images, autolinks, footnote references and
 // backslash escapes, with every other byte escaped. Unmatched markers
 // stay literal text. The Options value switches the extensions on.
+//
+// The pass has three steps. The scan turns the span into a flat list of
+// tokens, with a stack of emphasis marks and a stack of open brackets.
+// A closing bracket forms a link or an image at once. process_delims
+// pairs the marks of a link text when the link forms, and the marks of
+// the rest at the end. The last step writes the tokens.
 namespace markdown;
 
 import std;
 import escape;
 import types;
+import unicode;
+import delims;
 
 fn is_space(c: u8) -> bool { return c == ' ' || c == '\n' || c == '\t'; }
 
@@ -93,6 +101,15 @@ fn find_close(s: const u8[:], from: i64) -> i64 {
 // parse_dest_title reads a destination and an optional title. It gives
 // the place after them and the space that follows. A fault gives -1.
 fn parse_dest_title(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] {
+    var memo: i64[3] = [-1, -1, -1];
+    return parse_dest_memo(s, from, memo);
+}
+
+// parse_dest_memo is parse_dest_title with a memory of failed title
+// searches. A title search that found no end from some place finds none
+// from a later place of the same text, so the memory keeps the scan of a
+// whole text linear. Slot 0 is for ", slot 1 for ' and slot 2 for (.
+fn parse_dest_memo(s: const u8[:], from: i64, memo: i64[3]&) -> i64, const u8[:], const u8[:] {
     var j = from;
     var ua: i64 = 0;
     var ub: i64 = 0;
@@ -101,7 +118,11 @@ fn parse_dest_title(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] 
     while j < s.len && is_space(s[j]) { j += 1; }
     if j < s.len && s[j] == '<' {
         var k = j + 1;
-        while k < s.len && s[k] != '>' && s[k] != '\n' { k += 1; }
+        while k < s.len && s[k] != '>' && s[k] != '\n' {
+            if s[k] == '<' { return -1, s[0..0], s[0..0]; }
+            if s[k] == '\\' && k + 1 < s.len { k += 2; continue; }
+            k += 1;
+        }
         if k >= s.len || s[k] != '>' { return -1, s[0..0], s[0..0]; }
         ua = j + 1;
         ub = k;
@@ -114,6 +135,9 @@ fn parse_dest_title(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] 
             if c == '\\' && k + 1 < s.len { k += 2; continue; }
             if c <= ' ' { break; }
             if c == '(' { depth += 1; }
+            // cmark allows 32 levels of parentheses. The limit keeps a
+            // scan short.
+            if depth > 32 { return -1, s[0..0], s[0..0]; }
             if c == ')' {
                 if depth == 0 { break; }
                 depth -= 1;
@@ -128,12 +152,17 @@ fn parse_dest_title(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] 
     while j < s.len && is_space(s[j]) { j += 1; }
     if j < s.len && (s[j] == '"' || s[j] == '\'' || s[j] == '(') {
         let close: u8 = if s[j] == '(' { ')' } else { s[j] };
+        let slot: i64 = if s[j] == '"' { 0 } else if s[j] == '\'' { 1 } else { 2 };
+        if memo[slot] >= 0 && j >= memo[slot] { return -1, s[0..0], s[0..0]; }
         var k = j + 1;
         while k < s.len && s[k] != close {
             if s[k] == '\\' { k += 1; }
             k += 1;
         }
-        if k >= s.len { return -1, s[0..0], s[0..0]; }
+        if k >= s.len {
+            memo[slot] = j;
+            return -1, s[0..0], s[0..0];
+        }
         ta = j + 1;
         tb = k;
         j = k + 1;
@@ -145,15 +174,15 @@ fn parse_dest_title(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] 
 // parse_dest reads the part of an inline link after the (: the
 // destination, an optional title and the closing ). It gives the place
 // after the ), the destination and the title. A fault gives -1.
-fn parse_dest(s: const u8[:], from: i64) -> i64, const u8[:], const u8[:] {
-    let j, url, title = parse_dest_title(s, from);
+fn parse_dest(s: const u8[:], from: i64, memo: i64[3]&) -> i64, const u8[:], const u8[:] {
+    let j, url, title = parse_dest_memo(s, from, memo);
     if j >= 0 && j < s.len && s[j] == ')' { return j + 1, url, title; }
     return -1, s[0..0], s[0..0];
 }
 
 // emit_text writes s[a..b] as text. With the smart flag it turns
 // quotes, dashes and dots into typographic characters.
-fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool) {
+fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool, after_open: bool) {
     if b <= a { return; }
     if !smart {
         escape_text(out, s[a..b]);
@@ -162,7 +191,8 @@ fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool) {
     var k = a;
     while k < b {
         let c = s[k];
-        let prev: u8 = if k > 0 { s[k - 1] } else { ' ' };
+        // The first byte after an opening marker counts as a start.
+        let prev: u8 = if k > 0 && !(after_open && k == a) { s[k - 1] } else { ' ' };
         if c == '"' {
             if is_space(prev) || prev == '(' || prev == '[' || prev == '{' {
                 out.append("“");
@@ -291,13 +321,40 @@ fn emit_open(out: u8[>..]&, url: const u8[:], title: const u8[:]) {
     out.append(">");
 }
 
-// emit_image writes an image. The alt text is the plain text of the
-// description.
-fn emit_image(out: u8[>..]&, alt: const u8[:], url: const u8[:], title: const u8[:]) {
+// unescape_bs writes the text with each backslash escape resolved.
+fn unescape_bs(out: u8[>..]&, t: const u8[:]) {
+    var i: i64 = 0;
+    while i < t.len {
+        if t[i] == '\\' && i + 1 < t.len && is_punct(t[i + 1]) { i += 1; }
+        out.push(t[i]);
+        i += 1;
+    }
+}
+
+// label_end gives the place of the ] that ends a link label that starts
+// at from, or -1. A label holds no unescaped bracket and at most 999
+// bytes.
+fn label_end(s: const u8[:], from: i64) -> i64 {
+    var j = from;
+    while j < s.len && j - from <= 999 {
+        let c = s[j];
+        if c == '\\' { j += 2; continue; }
+        if c == '[' { return -1; }
+        if c == ']' { return j; }
+        j += 1;
+    }
+    return -1;
+}
+
+// emit_img_head writes the start of an image, up to its alt text.
+fn emit_img_head(out: u8[>..]&, url: const u8[:]) {
     out.append("<img src=\"");
     escape_url(out, url);
     out.append("\" alt=\"");
-    escape_attr(out, alt);
+}
+
+// emit_img_tail writes the end of an image, after its alt text.
+fn emit_img_tail(out: u8[>..]&, title: const u8[:]) {
     out.append("\"");
     if title.len > 0 {
         out.append(" title=\"");
@@ -323,53 +380,125 @@ fn foot_ref(out: u8[>..]&, st: State&, idx: i64) {
     out.append("</a></sup>");
 }
 
-// emit_link writes the link or the image for the text s[open+1..close].
-recursive fn emit_link(out: u8[>..]&, s: const u8[:], open: i64, close: i64, image: bool, url: const u8[:], title: const u8[:], o: Options, st: State&) {
-    if image {
-        emit_image(out, s[open + 1..close], url, title);
-    } else {
-        emit_open(out, url, title);
-        render_inline(out, s[open + 1..close], o, st);
-        out.append("</a>");
+
+// push_text adds the input range s[a..b] to the tokens, if it holds a byte.
+fn push_text(toks: Tok[>..]&, a: i64, b: i64) {
+    if b > a { toks.push(Tok { kind: K_TEXT, a: a, b: b, pa: 0, pb: 0 }); }
+}
+
+// push_raw adds the pre range from..pre.len as a token of the kind.
+fn push_raw(toks: Tok[>..]&, kind: i64, from: i64, to: i64, pa: i64, pb: i64) {
+    toks.push(Tok { kind: kind, a: from, b: to, pa: pa, pb: pb });
+}
+
+// render_toks writes the tokens. Inside an image only the text shows,
+// for the alt attribute.
+fn render_toks(out: u8[>..]&, s: const u8[:], toks: Tok[>..]&, pre: u8[>..]&, plain: u8[>..]&, smart: bool) {
+    var alt: i64 = 0;
+    var n: i64 = 0;
+    var prev_kind: i64 = K_NONE;
+    while n < toks.len {
+        let k = toks[n].kind;
+        let a = toks[n].a;
+        let b = toks[n].b;
+        if alt > 0 {
+            if k == K_TEXT {
+                escape_attr(out, s[a..b]);
+            } else if k == K_RAW {
+                escape_attr(out, plain[toks[n].pa..toks[n].pb]);
+            } else if k == K_IMG_OPEN {
+                alt += 1;
+            } else if k == K_IMG_CLOSE {
+                alt -= 1;
+                if alt == 0 { out.append(pre[a..b]); }
+            }
+        } else if k == K_TEXT {
+            let opened = prev_kind == K_EM_OPEN || prev_kind == K_STRONG_OPEN
+                         || prev_kind == K_DEL_OPEN || prev_kind == K_LINK_OPEN;
+            emit_text(out, s, a, b, smart, opened);
+        } else if k == K_RAW || k == K_LINK_OPEN || k == K_LINK_CLOSE {
+            out.append(pre[a..b]);
+        } else if k == K_IMG_OPEN {
+            out.append(pre[a..b]);
+            alt = 1;
+        } else if k == K_EM_OPEN {
+            out.append("<em>");
+        } else if k == K_EM_CLOSE {
+            out.append("</em>");
+        } else if k == K_STRONG_OPEN {
+            out.append("<strong>");
+        } else if k == K_STRONG_CLOSE {
+            out.append("</strong>");
+        } else if k == K_DEL_OPEN {
+            out.append("<del>");
+        } else if k == K_DEL_CLOSE {
+            out.append("</del>");
+        }
+        if k != K_NONE { prev_kind = k; }
+        n += 1;
     }
 }
 
 // render_inline writes the inline HTML of one span into out.
-recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
+fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
+    var toks: Tok[>..] = [];
+    var dl: Delim[>..<] = [];
+    var br: Brack[>..<] = [];
+    var pre: u8[>..] = [];
+    var plain: u8[>..] = [];
+    // Every open bracket below this place is dead for a link. An image
+    // bracket stays alive.
+    var dead_below: i64 = 0;
+    // Bit n is set when a run of n backticks found no partner.
+    var bt_fail: i64 = 0;
+    // Where a title search failed, for each kind of title. See parse_dest_memo.
+    var title_memo: i64[3] = [-1, -1, -1];
     var i: i64 = 0;
-    var text_start: i64 = 0;
+    var ts: i64 = 0;
 
     while i < s.len {
         let c = s[i];
         if c == '\\' && i + 1 < s.len && is_punct(s[i + 1]) {
-            emit_text(out, s, text_start, i, o.smart);
-            escape_text(out, s[i + 1..i + 2]);
+            push_text(toks, ts, i);
+            let p0 = pre.len;
+            escape_text(pre, s[i + 1..i + 2]);
+            let q0 = plain.len;
+            plain.push(s[i + 1]);
+            push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
             i += 2;
-            text_start = i;
+            ts = i;
         } else if c == '\\' && i + 1 < s.len && s[i + 1] == '\n' {
-            emit_text(out, s, text_start, i, o.smart);
-            out.append("<br />\n");
+            push_text(toks, ts, i);
+            let p0 = pre.len;
+            pre.append("<br />\n");
+            let q0 = plain.len;
+            plain.push('\n');
+            push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
             i += 2;
             while i < s.len && s[i] == ' ' { i += 1; }
-            text_start = i;
+            ts = i;
         } else if c == '\n' {
-            // The spaces before the line end: two or more give a hard
-            // break, and none stay in the text.
+            // Two spaces or more before the line end give a hard break.
+            // No space stays in the text.
             var ws: i64 = 0;
-            while i - ws > text_start && s[i - ws - 1] == ' ' { ws += 1; }
-            emit_text(out, s, text_start, i - ws, o.smart);
-            if ws >= 2 { out.append("<br />\n"); } else { out.append("\n"); }
+            while i - ws > ts && s[i - ws - 1] == ' ' { ws += 1; }
+            push_text(toks, ts, i - ws);
+            let p0 = pre.len;
+            if ws >= 2 { pre.append("<br />\n"); } else { pre.append("\n"); }
+            let q0 = plain.len;
+            plain.push('\n');
+            push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
             i += 1;
             while i < s.len && s[i] == ' ' { i += 1; }
-            text_start = i;
+            ts = i;
         } else if c == '`' {
-            // A run of backticks: find the matching run.
             var run_end = i;
             while run_end < s.len && s[run_end] == '`' { run_end += 1; }
             let run_len = run_end - i;
             var j = run_end;
             var closed = false;
-            while j < s.len {
+            let known_fail = run_len < 60 && ((bt_fail >> run_len) & 1) == 1;
+            while !known_fail && j < s.len {
                 if s[j] != '`' { j += 1; continue; }
                 var k = j;
                 while k < s.len && s[k] == '`' { k += 1; }
@@ -377,8 +506,7 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
                 j = k;
             }
             if closed {
-                emit_text(out, s, text_start, i, o.smart);
-                out.append("<code>");
+                push_text(toks, ts, i);
                 // A code span trims one space on each side when both
                 // sides have one and the span is not all spaces.
                 var a = run_end;
@@ -389,195 +517,207 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
                     while q < b { if s[q] != ' ' { all_space = false; } q += 1; }
                     if !all_space { a += 1; b -= 1; }
                 }
-                escape_text(out, s[a..b]);
-                out.append("</code>");
+                let p0 = pre.len;
+                pre.append("<code>");
+                escape_text(pre, s[a..b]);
+                pre.append("</code>");
+                let q0 = plain.len;
+                plain.append(s[a..b]);
+                push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = j + run_len;
-                text_start = i;
+                ts = i;
             } else {
+                if run_len < 60 { bt_fail = bt_fail | (1 << run_len); }
                 i = run_end;
             }
         } else if c == '*' || c == '_' {
             var run_end = i;
             while run_end < s.len && s[run_end] == c { run_end += 1; }
             let count = run_end - i;
-            let before: u8 = if i > 0 { s[i - 1] } else { ' ' };
-            let after: u8 = if run_end < s.len { s[run_end] } else { ' ' };
-            var can_open = !is_space(after);
-            if c == '_' && is_alnum(before) { can_open = false; }
-            var matched = false;
-            if can_open {
-                // Look for the closing run.
-                var j = run_end;
-                while j < s.len {
-                    if s[j] == '`' {
-                        // A code span hides its markers.
-                        var k = j;
-                        while k < s.len && s[k] == '`' { k += 1; }
-                        let n = k - j;
-                        var m = k;
-                        var found = false;
-                        while m < s.len {
-                            if s[m] != '`' { m += 1; continue; }
-                            var e = m;
-                            while e < s.len && s[e] == '`' { e += 1; }
-                            if e - m == n { found = true; m = e; break; }
-                            m = e;
-                        }
-                        j = if found { m } else { k };
-                        continue;
-                    }
-                    if s[j] == '\\' { j += 2; continue; }
-                    // A raw tag or an autolink binds more tightly than
-                    // emphasis, so its markers hide.
-                    if s[j] == '<' {
-                        let hl = raw_lt_len(s, j);
-                        if hl > 0 { j += hl; continue; }
-                    }
-                    if s[j] != c { j += 1; continue; }
-                    var e = j;
-                    while e < s.len && s[e] == c { e += 1; }
-                    let pj: u8 = s[j - 1];
-                    let nj: u8 = if e < s.len { s[e] } else { ' ' };
-                    var can_close = !is_space(pj);
-                    if c == '_' && is_alnum(nj) { can_close = false; }
-                    if can_close && j > run_end {
-                        let n = min(count, e - j);
-                        emit_text(out, s, text_start, i + (count - n), o.smart);
-                        if n >= 3 {
-                            out.append("<em><strong>");
-                            render_inline(out, s[run_end..j], o, st);
-                            out.append("</strong></em>");
-                        } else if n == 2 {
-                            out.append("<strong>");
-                            render_inline(out, s[run_end..j], o, st);
-                            out.append("</strong>");
-                        } else {
-                            out.append("<em>");
-                            render_inline(out, s[run_end..j], o, st);
-                            out.append("</em>");
-                        }
-                        i = j + n;
-                        text_start = i;
-                        matched = true;
-                        break;
-                    }
-                    j = e;
+            let can_open, can_close = flanks(s, i, run_end, c == '_');
+            if can_open || can_close {
+                push_text(toks, ts, i);
+                var k: i64 = 0;
+                while k < count {
+                    dl.push(Delim { tok: toks.len, marker: c, len: count, end: -1, open: can_open, close: can_close });
+                    push_text(toks, i + k, i + k + 1);
+                    k += 1;
                 }
+                ts = run_end;
             }
-            if !matched { i = run_end; }
-        } else if c == '~' && o.strikethrough && i + 1 < s.len && s[i + 1] == '~'
-                  && !(i + 2 < s.len && s[i + 2] == '~') && i + 2 < s.len && !is_space(s[i + 2]) {
-            var j = i + 2;
-            var found: i64 = -1;
-            while j + 1 < s.len {
-                if s[j] == '<' {
-                    let hl = raw_lt_len(s, j);
-                    if hl > 0 { j += hl; continue; }
-                }
-                if s[j] == '~' && s[j + 1] == '~' && !is_space(s[j - 1])
-                   && !(j + 2 < s.len && s[j + 2] == '~') { found = j; break; }
-                j += 1;
+            i = run_end;
+        } else if c == '~' && o.strikethrough {
+            var run_end = i;
+            while run_end < s.len && s[run_end] == '~' { run_end += 1; }
+            let can_open = run_end - i == 2 && run_end < s.len && !is_space(s[run_end]);
+            let can_close = run_end - i == 2 && i > 0 && !is_space(s[i - 1]);
+            if can_open || can_close {
+                push_text(toks, ts, i);
+                dl.push(Delim { tok: toks.len, marker: '~', len: 0, end: -1, open: can_open, close: can_close });
+                push_text(toks, i, run_end);
+                ts = run_end;
             }
-            if found >= 0 {
-                emit_text(out, s, text_start, i, o.smart);
-                out.append("<del>");
-                render_inline(out, s[i + 2..found], o, st);
-                out.append("</del>");
-                i = found + 2;
-                text_start = i;
-            } else {
-                i += 2;
-            }
+            i = run_end;
         } else if c == '<' {
-            // A raw tag goes out as it stands. The rule runs before the
-            // autolink rule; the two forms never overlap.
+            // A raw tag goes out as it stands. The tag rule runs before
+            // the autolink rule. The two forms never overlap.
             let tl = if o.escape_html { 0 } else { html_tag_len(s, i) };
             if tl > 0 {
-                emit_text(out, s, text_start, i, o.smart);
-                out.append(s[i..i + tl]);
+                push_text(toks, ts, i);
+                let p0 = pre.len;
+                pre.append(s[i..i + tl]);
+                push_raw(toks, K_RAW, p0, pre.len, 0, 0);
                 i += tl;
-                text_start = i;
+                ts = i;
                 continue;
             }
             let al = autolink_len(s, i);
             if al > 0 {
                 let close = i + al - 1;
                 let inner = s[i + 1..close];
-                emit_text(out, s, text_start, i, o.smart);
+                push_text(toks, ts, i);
+                let p0 = pre.len;
                 if scheme_len(inner) > 0 {
-                    emit_open(out, inner, "");
+                    emit_open(pre, inner, "");
                 } else {
-                    emit_open(out, str("mailto:", inner), "");
+                    emit_open(pre, str("mailto:", inner), "");
                 }
-                escape_text(out, inner);
-                out.append("</a>");
+                escape_text(pre, inner);
+                pre.append("</a>");
+                let q0 = plain.len;
+                plain.append(inner);
+                push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = close + 1;
-                text_start = i;
+                ts = i;
             } else {
                 i += 1;
             }
-        } else if (c == '[' || (c == '!' && i + 1 < s.len && s[i + 1] == '[')) {
+        } else if c == '[' || (c == '!' && i + 1 < s.len && s[i + 1] == '[') {
             let image = c == '!';
-            let open = if image { i + 1 } else { i };
-            let close = find_close(s, open + 1);
-            var end: i64 = -1;
-            if close >= 0 {
-                let label = s[open + 1..close];
-                let after = close + 1;
-                if o.footnotes && !image && label.len > 1 && label[0] == '^' {
-                    let foot = find_def(st, label[1..], true);
-                    if foot >= 0 {
-                        emit_text(out, s, text_start, i, o.smart);
-                        foot_ref(out, st, foot);
-                        end = after;
-                    }
-                }
-                if end < 0 && after < s.len && s[after] == '(' {
-                    let e, u, t = parse_dest(s, after + 1);
-                    if e >= 0 {
-                        emit_text(out, s, text_start, i, o.smart);
-                        emit_link(out, s, open, close, image, u, t, o, st);
-                        end = e;
-                    }
-                }
-                if end < 0 && !(o.footnotes && label.len > 0 && label[0] == '^') {
-                    // A reference link: [text][label], [text][] or [label].
-                    var key = label;
-                    var e2 = after;
-                    if after < s.len && s[after] == '[' {
-                        let c2 = find_close(s, after + 1);
-                        if c2 >= 0 {
-                            if c2 > after + 1 { key = s[after + 1..c2]; }
-                            e2 = c2 + 1;
-                        }
-                    }
-                    let idx = find_def(st, key, false);
-                    if idx >= 0 {
-                        emit_text(out, s, text_start, i, o.smart);
-                        emit_link(out, s, open, close, image, st.defs[idx].url, st.defs[idx].title, o, st);
-                        end = e2;
-                    }
-                }
-            }
-            if end >= 0 {
-                i = end;
-                text_start = i;
-            } else {
+            push_text(toks, ts, i);
+            let width: i64 = if image { 2 } else { 1 };
+            br.push(Brack { tok: toks.len, image: image, pos: i + width, dstart: dl.len });
+            push_text(toks, i, i + width);
+            i += width;
+            ts = i;
+        } else if c == ']' {
+            if br.len == 0 { i += 1; continue; }
+            let top = br.len - 1;
+            let image = br[top].image;
+            if !image && top < dead_below {
+                br.pop();
+                if dead_below > br.len { dead_below = br.len; }
                 i += 1;
+                continue;
             }
+            let open = br[top].pos;
+            let label = s[open..i];
+            let after = i + 1;
+            var end: i64 = -1;
+            var foot: i64 = -1;
+            var didx: i64 = -1;
+            var uu: const u8[:] = s[0..0];
+            var tt: const u8[:] = s[0..0];
+            if o.footnotes && !image && label.len > 1 && label[0] == '^' {
+                foot = find_def(st, label[1..], true);
+                if foot >= 0 { end = after; }
+            }
+            if end < 0 && after < s.len && s[after] == '(' {
+                let e, u, t = parse_dest(s, after + 1, title_memo);
+                if e >= 0 {
+                    end = e;
+                    uu = u;
+                    tt = t;
+                }
+            }
+            if end < 0 && !(o.footnotes && label.len > 0 && label[0] == '^') {
+                // A reference link: [text][label], [text][] or [label].
+                var key = label;
+                var e2 = after;
+                if after < s.len && s[after] == '[' {
+                    let c2 = label_end(s, after + 1);
+                    if c2 >= 0 {
+                        if c2 > after + 1 { key = s[after + 1..c2]; }
+                        e2 = c2 + 1;
+                    }
+                }
+                let idx = find_def(st, key, false);
+                if idx >= 0 {
+                    end = e2;
+                    didx = idx;
+                }
+            }
+            if end < 0 {
+                br.pop();
+                if dead_below > br.len { dead_below = br.len; }
+                i += 1;
+                continue;
+            }
+            push_text(toks, ts, i);
+            let ot = br[top].tok;
+            let dstart = br[top].dstart;
+            if foot >= 0 {
+                // The label shows as the reference. Its tokens are void.
+                var m = ot + 1;
+                while m < toks.len { toks[m].kind = K_NONE; m += 1; }
+                let p0 = pre.len;
+                foot_ref(pre, st, foot);
+                toks[ot].kind = K_RAW;
+                toks[ot].a = p0;
+                toks[ot].b = pre.len;
+                while dl.len > dstart { dl.pop(); }
+            } else {
+                process_delims(toks, dl, dstart, dl.len);
+                while dl.len > dstart { dl.pop(); }
+                var ub: u8[>..] = [];
+                var tb: u8[>..] = [];
+                if didx >= 0 {
+                    unescape_bs(ub, st.defs[didx].url);
+                    unescape_bs(tb, st.defs[didx].title);
+                } else {
+                    unescape_bs(ub, uu);
+                    unescape_bs(tb, tt);
+                }
+                let p0 = pre.len;
+                if image {
+                    emit_img_head(pre, ub[..]);
+                    toks[ot].kind = K_IMG_OPEN;
+                    toks[ot].a = p0;
+                    toks[ot].b = pre.len;
+                    let t0 = pre.len;
+                    emit_img_tail(pre, tb[..]);
+                    push_raw(toks, K_IMG_CLOSE, t0, pre.len, 0, 0);
+                } else {
+                    emit_open(pre, ub[..], tb[..]);
+                    toks[ot].kind = K_LINK_OPEN;
+                    toks[ot].a = p0;
+                    toks[ot].b = pre.len;
+                    let t0 = pre.len;
+                    pre.append("</a>");
+                    push_raw(toks, K_LINK_CLOSE, t0, pre.len, 0, 0);
+                }
+            }
+            br.pop();
+            if !image { dead_below = br.len; }
+            if dead_below > br.len { dead_below = br.len; }
+            i = end;
+            ts = i;
         } else if o.autolinks && (c == 'h' || c == 'w')
                   && (i == 0 || is_space(s[i - 1]) || s[i - 1] == '(' || s[i - 1] == '*'
                       || s[i - 1] == '_' || s[i - 1] == '~' || s[i - 1] == '>') {
             let e = bare_end(s, i);
             if e > i {
-                emit_text(out, s, text_start, i, o.smart);
-                let www = s[i] == 'w';
-                if www { emit_open(out, str("http://", s[i..e]), ""); }
-                else { emit_open(out, s[i..e], ""); }
-                escape_text(out, s[i..e]);
-                out.append("</a>");
+                push_text(toks, ts, i);
+                let p0 = pre.len;
+                if s[i] == 'w' { emit_open(pre, str("http://", s[i..e]), ""); }
+                else { emit_open(pre, s[i..e], ""); }
+                escape_text(pre, s[i..e]);
+                pre.append("</a>");
+                let q0 = plain.len;
+                plain.append(s[i..e]);
+                push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = e;
-                text_start = i;
+                ts = i;
             } else {
                 i += 1;
             }
@@ -587,6 +727,8 @@ recursive fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&
     }
     // The spaces at the end of the span do not show.
     var tail = s.len;
-    while tail > text_start && s[tail - 1] == ' ' { tail -= 1; }
-    emit_text(out, s, text_start, tail, o.smart);
+    while tail > ts && s[tail - 1] == ' ' { tail -= 1; }
+    push_text(toks, ts, tail);
+    process_delims(toks, dl, 0, dl.len);
+    render_toks(out, s, toks, pre, plain, o.smart);
 }

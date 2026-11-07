@@ -20,7 +20,7 @@ Text that only looks like a tag still comes out escaped. Pure Goose, no C.
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v0.3.0";
+import markdown from "rekanalar/goose-markdown@v0.4.0";
 ```
 
 ## API
@@ -54,7 +54,7 @@ The renderer never fails on content. Every input renders to some output.
 ## Limits
 
 The renderer does not pass the whole CommonMark suite. Of the 652
-examples of CommonMark 0.31.2, 453 pass (`test/spec.goose`). These parts
+examples of CommonMark 0.31.2, 527 pass (`test/spec.goose`). These parts
 are open:
 
 - An HTML block inside a block quote or a list item renders as text.
@@ -69,13 +69,18 @@ are open:
 - A quote holds paragraphs only. A heading, a list or a code block
   inside a quote renders as text.
 - Tabs are not expanded to columns.
-- The emphasis rules are close to the spec, not the full delimiter
-  algorithm.
+- Emphasis, links and images follow the delimiter and bracket rules of
+  the spec. They run in linear time.
+- Four link examples stay open. Two need entities in a destination or a
+  title (503, 506). One needs the case fold of a label (540). One needs a
+  definition label over two lines (541).
+- Three examples about definitions with a bracket in the label stay open
+  (547, 548, 590).
 - Heading ids of `anchors` keep the text of the heading as plain
   letters and digits. They do not strip inline markup first.
 - A footnote holds one paragraph. A table cell holds inline text only.
-- The `smart` option takes no account of the text around a span that
-  inline markup cuts.
+- The `smart` option reads the quote marks of one text run. It treats a
+  quote after an opening marker as an opening quote.
 
 ## Test
 

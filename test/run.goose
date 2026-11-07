@@ -4,6 +4,7 @@
 // one escape test per construct, and the XSS scenarios.
 
 import std;
+import os;
 import markdown from "..";
 
 fn expect_render(md: const u8[:], want: const u8[:]) {
@@ -283,7 +284,7 @@ fn test_raw_html() {
     // A tag hides a closing marker from the strikethrough scan.
     expect_with("~~<em title=\"~~\">x~~", markdown::Options { strikethrough: true, .. }, "<p><del><em title=\"~~\">x</del></p>\n");
     // An autolink hides a ] from the link scan.
-    expect_render("[a <http://x/]>](u)", "<p><a href=\"u\">a <a href=\"http://x/]\">http://x/]</a></a></p>\n");
+    expect_render("[a <http://x/]>](u)", "<p><a href=\"u\">a <a href=\"http://x/%5D\">http://x/]</a></a></p>\n");
 }
 
 fn test_escape_html_option() {
@@ -293,6 +294,91 @@ fn test_escape_html_option() {
     expect_with("<!-- c -->", markdown::Options { escape_html: true, .. }, "<p>&lt;!-- c --&gt;</p>\n");
     // The option leaves the rest of the renderer alone.
     expect_with("# T\n\n*a*", markdown::Options { escape_html: true, .. }, "<h1>T</h1>\n<p><em>a</em></p>\n");
+}
+
+fn test_emphasis_stack() {
+    // The pairs nest as the spec says.
+    expect_render("*foo **bar** baz*", "<p><em>foo <strong>bar</strong> baz</em></p>\n");
+    expect_render("*foo *bar**", "<p><em>foo <em>bar</em></em></p>\n");
+    expect_render("***foo** bar*", "<p><em><strong>foo</strong> bar</em></p>\n");
+    expect_render("foo******bar*********baz", "<p>foo<strong><strong><strong>bar</strong></strong></strong>***baz</p>\n");
+    // The rule of 3.
+    expect_render("*foo**bar**baz*", "<p><em>foo<strong>bar</strong>baz</em></p>\n");
+    expect_render("*foo**bar*", "<p><em>foo**bar</em></p>\n");
+    // The underscore does not split a word. The star does.
+    expect_render("foo_bar_", "<p>foo_bar_</p>\n");
+    expect_render("foo*bar*", "<p>foo<em>bar</em></p>\n");
+    // Unicode punctuation, symbols and white space decide the flanks.
+    expect_render("*$*alpha.", "<p>*$*alpha.</p>\n");
+    expect_render("*£*bravo.", "<p>*£*bravo.</p>\n");
+    expect_render("* a *", "<p>* a *</p>\n");
+    expect_render("a*\"foo\"*", "<p>a*&quot;foo&quot;*</p>\n");
+}
+
+fn test_smart_after_marker() {
+    var out: u8[>..] = [];
+    markdown::render_with(out, "*\"foo\"* and [\"bar\"](/u)", markdown::Options { smart: true, .. });
+    assert(out == "<p><em>“foo”</em> and <a href=\"/u\">“bar”</a></p>\n");
+}
+
+fn test_bracket_stack() {
+    // Emphasis lives inside the link text, and does not cross it.
+    expect_render("[link *foo **bar** `#`*](/uri)", "<p><a href=\"/uri\">link <em>foo <strong>bar</strong> <code>#</code></em></a></p>\n");
+    expect_render("*[foo*](/uri)", "<p>*<a href=\"/uri\">foo*</a></p>\n");
+    expect_render("*foo [*bar*](/url)*", "<p><em>foo <a href=\"/url\"><em>bar</em></a></em></p>\n");
+    // A link holds no link. The inner link stays.
+    expect_render("[foo [bar](/uri)](/uri)", "<p>[foo <a href=\"/uri\">bar</a>](/uri)</p>\n");
+    expect_render("[foo *[bar [baz](/uri)](/uri)*](/uri)", "<p>[foo <em>[bar <a href=\"/uri\">baz</a>](/uri)</em>](/uri)</p>\n");
+    // A code span or a raw tag hides its brackets.
+    expect_render("[foo`](/uri)`", "<p>[foo<code>](/uri)</code></p>\n");
+    // The destination resolves backslash escapes. An angle destination refuses a lone \\>.
+    expect_render("[link](\\(foo\\))", "<p><a href=\"(foo)\">link</a></p>\n");
+    expect_render("[link](<foo\\>)", "<p>[link](&lt;foo&gt;)</p>\n");
+    // The alt text of an image is plain text.
+    expect_render("![foo *bar*](/url)", "<p><img src=\"/url\" alt=\"foo bar\" /></p>\n");
+    expect_render("![foo ![bar](/url)](/url2)", "<p><img src=\"/url2\" alt=\"foo bar\" /></p>\n");
+    expect_render("![foo [bar](/url)](/url2)", "<p><img src=\"/url2\" alt=\"foo bar\" /></p>\n");
+    expect_render("![foo *bar*][]\n\n[foo *bar*]: train.jpg \"train & tracks\"", "<p><img src=\"train.jpg\" alt=\"foo bar\" title=\"train &amp; tracks\" /></p>\n");
+}
+
+// time_render renders the text and gives the seconds it took.
+fn time_render(text: const u8[:]) -> f64 {
+    var out: u8[>..] = [];
+    let t0 = clock();
+    markdown::render(out, text);
+    return clock() - t0;
+}
+
+fn repeat(unit: const u8[:], n: i64) -> u8[>..] {
+    var s: u8[>..] = [];
+    var i: i64 = 0;
+    while i < n { s.append(unit); i += 1; }
+    return s;
+}
+
+// Hostile input must render in linear time: each case ends in under a
+// second. A quadratic scan needs minutes for 100000 units.
+fn test_hostile_time() {
+    let a = repeat("*", 100000);
+    assert(time_render(a[..]) < 1.0);
+    let b = repeat("[", 100000);
+    assert(time_render(b[..]) < 1.0);
+    let c = repeat("*a ", 100000);
+    assert(time_render(c[..]) < 1.0);
+    let d = repeat("[a](", 100000);
+    assert(time_render(d[..]) < 1.0);
+    let e = repeat("_*", 100000);
+    assert(time_render(e[..]) < 1.0);
+    let f = repeat("![a", 100000);
+    assert(time_render(f[..]) < 1.0);
+    let g = repeat("`a``", 50000);
+    assert(time_render(g[..]) < 1.0);
+    let h = repeat("[a](b \"c ", 50000);
+    assert(time_render(h[..]) < 1.0);
+    let k = repeat("[a](b 'c ", 50000);
+    assert(time_render(k[..]) < 1.0);
+    let m = repeat("(www.", 50000);
+    assert(time_render(m[..]) < 1.0);
 }
 
 fn main() {
@@ -329,6 +415,10 @@ fn main() {
     test_html_block();
     test_raw_html();
     test_escape_html_option();
+    test_emphasis_stack();
+    test_bracket_stack();
+    test_smart_after_marker();
+    test_hostile_time();
     print("all tests passed");
     return 0;
 }
