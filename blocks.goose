@@ -1,20 +1,18 @@
 // The block renderer for the markdown package.
 //
-// render_blocks scans the input line by line and renders each block:
-// headings, paragraphs, fenced and indented code, blockquotes, lists and
-// thematic breaks. The scan is one loop; nesting is bounded by caps on
-// quote depth (16) and list depth (8), so no input can push the renderer
-// into deep state. Link reference definitions and footnote definitions
-// are read first and left out of the flow.
+// parse_blocks reads the input into a tree of blocks. The walker then
+// renders the tree with the rules of CommonMark: every block gets a
+// newline before its open tag when the last output byte is not one, and
+// containers carry their own close lines. Link reference definitions
+// and footnote definitions leave the flow; the footnotes render at the
+// end in the order of first use.
 namespace markdown;
 
 import std;
 import escape;
 import types;
 import inline;
-
-const MAX_QUOTE_DEPTH = 16;
-const MAX_LIST_DEPTH = 8;
+import blocktree;
 
 // split_lines gives the lines of the text as spans. A Windows line end
 // gives the same line as a Unix one. The spans point into the input.
@@ -80,30 +78,6 @@ fn heading_level(line: const u8[:]) -> i64 {
     return n;
 }
 
-// list_marker gives the item marker of the line: 1 for unordered, 2 for
-// ordered, 0 when the line starts no item. The text_start is the place
-// after the marker and its space.
-fn list_marker(line: const u8[:]) -> i64, i64 {
-    let sp = leading_spaces(line);
-    if sp >= 4 { return 0, 0; }
-    if sp >= line.len { return 0, 0; }
-    let c = line[sp];
-    if c == '-' || c == '+' || c == '*' {
-        if sp + 1 < line.len && line[sp + 1] == ' ' {
-            return 1, sp + 2;
-        }
-        return 0, 0;
-    }
-    if c >= '0' && c <= '9' {
-        var j = sp;
-        while j < line.len && line[j] >= '0' && line[j] <= '9' { j += 1; }
-        if j < line.len && (line[j] == '.' || line[j] == ')') && j + 1 < line.len && line[j + 1] == ' ' {
-            return 2, j + 2;
-        }
-    }
-    return 0, 0;
-}
-
 // fence_info holds when the line opens a fenced code block, and gives
 // the info string. The fence_char is ` or ~.
 fn fence_open(line: const u8[:]) -> i64, u8, const u8[:] {
@@ -115,18 +89,6 @@ fn fence_open(line: const u8[:]) -> i64, u8, const u8[:] {
     while run_end < line.len && line[run_end] == c { run_end += 1; }
     if run_end - sp < 3 { return -1, '`', ""; }
     return run_end, c, line[run_end..];
-}
-
-// fence_close holds when the line closes the fence with the same char
-// and at least as many.
-fn fence_close(line: const u8[:], c: u8, count: i64) -> bool {
-    let sp = leading_spaces(line);
-    if sp >= line.len { return false; }
-    if line[sp] != c { return false; }
-    var run_end = sp;
-    while run_end < line.len && line[run_end] == c { run_end += 1; }
-    if run_end - sp < count { return false; }
-    return run_end == line.len;
 }
 
 
@@ -142,17 +104,6 @@ fn setext_level(line: const u8[:]) -> i64 {
     while j < line.len && line[j] == ' ' { j += 1; }
     if j != line.len { return 0; }
     return if c == '=' { 1 } else { 2 };
-}
-
-// atx_text gives the text of a heading line: no marker, no closing
-// run of # and no space around it.
-fn atx_text(line: const u8[:], level: i64) -> const u8[:] {
-    var t = trim(line[leading_spaces(line) + level..]);
-    var e = t.len;
-    while e > 0 && t[e - 1] == '#' { e -= 1; }
-    if e == 0 { return t[..0]; }
-    if e < t.len && t[e - 1] != ' ' && t[e - 1] != '\t' { return t; }
-    return trim(t[..e]);
 }
 
 // id_taken holds when a heading has the id already. The ids sit in one
@@ -192,22 +143,6 @@ fn make_id(out: u8[>..]&, text: const u8[:], ids: u8[>..]&) {
     ids.append(full[..]);
     ids.push('\n');
     out.append(full[..]);
-}
-
-// emit_heading writes a heading of the level for the text.
-fn emit_heading(out: u8[>..]&, ids: u8[>..]&, text: const u8[:], level: i64, o: Options, st: State&) {
-    out.append("<h");
-    out.push(('0' + level) as u8);
-    if o.anchors {
-        out.append(" id=\"");
-        make_id(out, text, ids);
-        out.append("\"");
-    }
-    out.append(">");
-    render_inline(out, text, o, st);
-    out.append("</h");
-    out.push(('0' + level) as u8);
-    out.append(">\n");
 }
 
 // split_cells cuts a table row into trimmed cells at each pipe that a
@@ -269,384 +204,320 @@ fn emit_row(out: u8[>..]&, cells: const u8[:][>..]&, aligns: u8[>..]&, tag: cons
     out.append("</tr>\n");
 }
 
-// parse_def reads a link reference definition from one line. It gives
-// the label, the destination, the title and true on success.
-fn parse_def(line: const u8[:]) -> const u8[:], const u8[:], const u8[:], bool {
-    let sp = leading_spaces(line);
-    if sp >= 4 || sp >= line.len || line[sp] != '[' { return "", "", "", false; }
-    let close = find_close(line, sp + 1);
-    if close < 0 || close + 1 >= line.len || line[close + 1] != ':' { return "", "", "", false; }
-    let label = line[sp + 1..close];
-    if is_blank(label) { return "", "", "", false; }
-    var rest = line[close + 2..];
-    if is_blank(rest) { return "", "", "", false; }
-    let e, url, title = parse_dest_title(rest, 0);
-    if e < 0 || e != rest.len || url.len == 0 && !(rest.len > 0 && trim(rest)[0] == '<') { return "", "", "", false; }
-    return label, url, title, true;
+// ---- the renderer over the block tree ----
+
+// cr writes a newline when the output does not end with one already.
+fn cr(out: u8[>..]&) {
+    if out.len == 0 { return; }
+    if out[out.len - 1] == '\n' { return; }
+    out.push('\n');
 }
 
-// collect_defs reads every definition into the state and marks its
-// lines, so the block render leaves them out.
-fn collect_defs(lines: const u8[:][>..]&, skip: bool[>..]&, o: Options, st: State&) {
+// leaf_join gives the text of a leaf block: its pieces, one per line,
+// with the spaces of a partly used tab before each piece.
+fn leaf_join(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, b: i64) {
+    var k: i64 = 0;
+    while k < bl[b].lcount {
+        if k > 0 { out.push('\n'); }
+        let p = ln[bl[b].lfirst + k];
+        var s: i64 = 0;
+        while s < p.padn { out.push(' '); s += 1; }
+        let e = piece_end(lines, p);
+        out.append(lines[p.line][p.from..e]);
+        k += 1;
+    }
+}
+
+// tight_para holds when the paragraph sits in a tight list.
+fn tight_para(bl: Blk[>..]&, b: i64) -> bool {
+    let p = bl[b].parent;
+    if p < 0 { return false; }
+    let g = bl[p].parent;
+    if g < 0 { return false; }
+    return bl[p].kind == B_ITEM && bl[g].kind == B_LIST && bl[g].tight;
+}
+
+// fence_word gives the first word of the fence info line, with the
+// character references resolved.
+fn fence_word(out: u8[>..]&, info: const u8[:]) {
+    var f: i64 = 0;
+    while f < info.len && (info[f] == ' ' || info[f] == '\t') { f += 1; }
+    var e = f;
+    while e < info.len && info[e] != ' ' && info[e] != '\t' { e += 1; }
+    if e == f { return; }
+    var raw: u8[>..] = [];
+    unescape_all(raw, info[f..e]);
     var i: i64 = 0;
-    var fence_char: u8 = 0;
-    var fence_len: i64 = 0;
-    while i < lines.len {
-        let line = lines[i];
-        if fence_char != 0 {
-            if fence_close(line, fence_char, fence_len) { fence_char = 0; }
-            i += 1;
+    while i < raw.len { out.push(raw[i]); i += 1; }
+}
+
+// code_body writes the pieces of a code block, each piece on one line.
+fn code_body(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, b: i64) {
+    var t: u8[>..] = [];
+    var k: i64 = 0;
+    while k < bl[b].lcount {
+        t.clear();
+        let p = ln[bl[b].lfirst + k];
+        var s: i64 = 0;
+        while s < p.padn { t.push(' '); s += 1; }
+        let e = piece_end(lines, p);
+        t.append(lines[p.line][p.from..e]);
+        escape_text(out, t[..]);
+        out.push('\n');
+        k += 1;
+    }
+}
+
+// render_table writes the table of the block. The first piece holds the
+// header row, the second the delimiter row, the rest the body rows.
+fn render_table(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, b: i64, o: Options, st: State&) {
+    cr(out);
+    out.append("<table>\n<thead>\n");
+    var aligns: u8[>..] = [];
+    var drow: u8[>..] = [];
+    let dp = ln[bl[b].lfirst + 1];
+    let de = piece_end(lines, dp);
+    var s: i64 = 0;
+    while s < dp.padn { drow.push(' '); s += 1; }
+    drow.append(lines[dp.line][dp.from..de]);
+    var dcells: const u8[:][>..] = [];
+    split_cells(dcells, drow[..]);
+    for d in dcells {
+        let left = d[0] == ':';
+        let right = d[d.len - 1] == ':';
+        if left && right { aligns.push('c'); }
+        else if left { aligns.push('l'); }
+        else if right { aligns.push('r'); }
+        else { aligns.push('0'); }
+    }
+    var row: u8[>..] = [];
+    var cells: const u8[:][>..] = [];
+    let hp = ln[bl[b].lfirst];
+    let he = piece_end(lines, hp);
+    row.append(lines[hp.line][hp.from..he]);
+    split_cells(cells, row[..]);
+    emit_row(out, cells, aligns, "th", o, st);
+    out.append("</thead>\n");
+    if bl[b].lcount > 2 {
+        out.append("<tbody>\n");
+        var k: i64 = 2;
+        while k < bl[b].lcount {
+            var row2: u8[>..] = [];
+            var cells2: const u8[:][>..] = [];
+            let p = ln[bl[b].lfirst + k];
+            let e = piece_end(lines, p);
+            row2.append(lines[p.line][p.from..e]);
+            split_cells(cells2, row2[..]);
+            emit_row(out, cells2, aligns, "td", o, st);
+            k += 1;
+        }
+        out.append("</tbody>\n");
+    }
+    out.append("</table>\n");
+}
+
+// render_leaf writes one leaf block.
+fn render_leaf(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&, b: i64) {
+    let k = bl[b].kind;
+    if k == B_PARA {
+        if tight_para(bl, b) {
+            var t: u8[>..] = [];
+            leaf_join(t, lines, bl, ln, b);
+            render_inline(out, t[..], o, st);
+            return;
+        }
+        cr(out);
+        out.append("<p>");
+        var t: u8[>..] = [];
+        leaf_join(t, lines, bl, ln, b);
+        render_inline(out, t[..], o, st);
+        out.append("</p>\n");
+    } else if k == B_HEAD {
+        cr(out);
+        out.append("<h");
+        out.push(('0' + bl[b].level) as u8);
+        var t: u8[>..] = [];
+        leaf_join(t, lines, bl, ln, b);
+        if o.anchors {
+            out.append(" id=\"");
+            make_id(out, t[..], ids);
+            out.append("\"");
+        }
+        out.append(">");
+        render_inline(out, t[..], o, st);
+        out.append("</h");
+        out.push(('0' + bl[b].level) as u8);
+        out.append(">\n");
+    } else if k == B_CODE {
+        cr(out);
+        out.append("<pre><code>");
+        code_body(out, lines, bl, ln, b);
+        out.append("</code></pre>\n");
+    } else if k == B_FENCE {
+        cr(out);
+        out.append("<pre><code");
+        let ia = bl[b].ia;
+        let ib = bl[b].ib;
+        var word: u8[>..] = [];
+        fence_word(word, lines[bl[b].start_line][ia..ib]);
+        if word.len > 0 {
+            out.append(" class=\"");
+            var pref: u8[>..] = [];
+            pref.append("language-");
+            var hit = word.len >= 9;
+            var q: i64 = 0;
+            var wlim: i64 = 9;
+            if word.len < wlim { wlim = word.len; }
+            while q < wlim { if word[q] != pref[q] { hit = false; } q += 1; }
+            if !hit { out.append("language-"); }
+            escape_attr(out, word[..]);
+            out.append("\"");
+        }
+        out.append(">");
+        code_body(out, lines, bl, ln, b);
+        out.append("</code></pre>\n");
+    } else if k == B_HTML {
+        cr(out);
+        var k2: i64 = 0;
+        while k2 < bl[b].lcount {
+            let p = ln[bl[b].lfirst + k2];
+            let e = piece_end(lines, p);
+            out.append(lines[p.line][p.from..e]);
+            out.push('\n');
+            k2 += 1;
+        }
+    } else if k == B_HR {
+        cr(out);
+        out.append("<hr />\n");
+    } else if k == B_TABLE {
+        render_table(out, lines, bl, ln, b, o, st);
+    }
+}
+
+// enter_block writes the open tag of a container.
+fn enter_block(out: u8[>..]&, bl: Blk[>..]&, b: i64) {
+    let k = bl[b].kind;
+    if k == B_QUOTE {
+        cr(out);
+        out.append("<blockquote>\n");
+    } else if k == B_LIST {
+        cr(out);
+        if bl[b].ordered {
+            if bl[b].start == 1 { out.append("<ol>\n"); }
+            else {
+                out.append("<ol start=\"");
+                format(out, bl[b].start);
+                out.append("\">\n");
+            }
+        } else {
+            out.append("<ul>\n");
+        }
+    } else if k == B_ITEM {
+        cr(out);
+        out.append("<li>");
+    }
+}
+
+// exit_block writes the close tag of a container.
+fn exit_block(out: u8[>..]&, bl: Blk[>..]&, b: i64) {
+    let k = bl[b].kind;
+    if k == B_QUOTE {
+        cr(out);
+        out.append("</blockquote>\n");
+    } else if k == B_LIST {
+        if bl[b].ordered { out.append("</ol>\n"); } else { out.append("</ul>\n"); }
+    } else if k == B_ITEM {
+        out.append("</li>\n");
+    }
+}
+
+// walk renders the children of the block root. The root itself writes
+// no tags, so the document and a footnote body share the same walk.
+fn walk(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&, root: i64) {
+    var nodes: i64[>..<] = [];
+    var curs: i64[>..<] = [];
+    nodes.push(root);
+    curs.push(bl[root].first);
+    while nodes.len > 0 {
+        let top = nodes.len - 1;
+        let c = curs[top];
+        if c < 0 {
+            exit_block(out, bl, nodes[top]);
+            nodes.pop();
+            curs.pop();
             continue;
         }
-        let fa, fc, fi = fence_open(line);
-        if fa >= 0 {
-            fence_char = fc;
-            fence_len = fence_run_len(line, fc);
-            i += 1;
-            continue;
-        }
-        let free = i == 0 || is_blank(lines[i - 1]) || skip[i - 1];
-        if free && o.footnotes {
-            let sp = leading_spaces(line);
-            if sp < 4 && sp + 3 < line.len && line[sp] == '[' && line[sp + 1] == '^' {
-                let close = find_close(line, sp + 1);
-                if close > sp + 2 && close + 1 < line.len && line[close + 1] == ':' {
-                    var k = i + 1;
-                    while k < lines.len && !is_blank(lines[k]) && leading_spaces(lines[k]) >= 2 { k += 1; }
-                    st.defs.push(Def { label: line[sp + 2..close], url: trim(line[close + 2..]), title: "", foot: true, order: 0, from: i + 1, to: k });
-                    var m = i;
-                    while m < k { skip[m] = true; m += 1; }
-                    i = k;
-                    continue;
+        curs[top] = bl[c].next;
+        let k = bl[c].kind;
+        if k == B_QUOTE || k == B_LIST || k == B_ITEM {
+            enter_block(out, bl, c);
+            nodes.push(c);
+            curs.push(bl[c].first);
+        } else if k == B_FOOT {
+            // A footnote definition stays out of the flow.
+        } else if k == B_VOID || k == B_DOC {
+            // Nothing to write.
+        } else {
+            // A task list marker goes before the first paragraph of an
+            // item. The piece drops its first four bytes.
+            if o.tasklists && k == B_PARA && c > 0 && bl[c].parent > 0
+               && bl[bl[c].parent].kind == B_ITEM && bl[bl[c].parent].first == c
+               && bl[c].lcount > 0 {
+                let p = ln[bl[c].lfirst];
+                let e = piece_end(lines, p);
+                let text = lines[p.line];
+                if e - p.from >= 4 && text[p.from] == '[' && (text[p.from + 1] == ' '
+                   || text[p.from + 1] == 'x' || text[p.from + 1] == 'X')
+                   && text[p.from + 2] == ']' && text[p.from + 3] == ' ' {
+                    if text[p.from + 1] == ' ' {
+                        out.append("<input type=\"checkbox\" disabled=\"\" /> ");
+                    } else {
+                        out.append("<input type=\"checkbox\" checked=\"\" disabled=\"\" /> ");
+                    }
+                    ln[bl[c].lfirst].from = p.from + 4;
                 }
             }
+            render_leaf(out, lines, bl, ln, ids, o, st, c);
         }
-        if free {
-            let label, url, title, ok = parse_def(line);
-            if ok {
-                if find_def(st, label, false) < 0 {
-                    st.defs.push(Def { label: label, url: url, title: title, foot: false, order: 0, from: 0, to: 0 });
-                }
-                skip[i] = true;
-            }
-        }
-        i += 1;
     }
 }
 
 // emit_footnotes writes the footnotes that the text used, in the order
-// of first use.
-fn emit_footnotes(out: u8[>..]&, lines: const u8[:][>..]&, o: Options, st: State&) {
+// of first use. The backlink goes before the close tag of the last
+// paragraph of the body.
+fn emit_footnotes(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&) {
     if st.nused == 0 { return; }
     out.append("<section class=\"footnotes\">\n<ol>\n");
     var n: i64 = 1;
     while n <= st.nused {
         var idx: i64 = 0;
         while idx < st.defs.len && st.defs[idx].order != n { idx += 1; }
-        var body: u8[>..] = [];
-        body.append(st.defs[idx].url);
-        var k = st.defs[idx].from;
-        while k < st.defs[idx].to {
-            body.push('\n');
-            body.append(trim(lines[k]));
-            k += 1;
-        }
+        let label = st.defs[idx].label;
         out.append("<li id=\"fn-");
-        escape_attr(out, st.defs[idx].label);
-        out.append("\">\n<p>");
-        render_inline(out, body[..], o, st);
+        escape_attr(out, label);
+        out.append("\">\n");
+        var tmp: u8[>..] = [];
+        walk(tmp, lines, bl, ln, ids, o, st, st.defs[idx].from);
+        var cut: i64 = -1;
+        var k = tmp.len - 4;
+        while k >= 0 {
+            if tmp[k] == '<' && tmp[k + 1] == '/' && tmp[k + 2] == 'p' && tmp[k + 3] == '>' {
+                cut = k;
+                break;
+            }
+            k -= 1;
+        }
+        var m: i64 = 0;
+        while m < cut { out.push(tmp[m]); m += 1; }
         out.append(" <a href=\"#fnref-");
-        escape_attr(out, st.defs[idx].label);
-        out.append("\">↩</a></p>\n</li>\n");
+        escape_attr(out, label);
+        out.append("\">\xe2\x86\xa9</a>");
+        m = cut;
+        while m < tmp.len { out.push(tmp[m]); m += 1; }
+        out.append("</li>\n");
         n += 1;
     }
     out.append("</ol>\n</section>\n");
-}
-
-// list_number gives the number of an ordered item.
-fn list_number(line: const u8[:]) -> i64 {
-    let sp = leading_spaces(line);
-    var n: i64 = 0;
-    var j = sp;
-    while j < line.len && line[j] >= '0' && line[j] <= '9' && n < 1000000000 {
-        n = n * 10 + (line[j] - '0');
-        j += 1;
-    }
-    return n;
-}
-
-fn is_quote(line: const u8[:]) -> bool {
-    let sp = leading_spaces(line);
-    return sp < 4 && sp < line.len && line[sp] == '>';
-}
-
-fn strip_indent(line: const u8[:], n: i64) -> const u8[:] {
-    var k: i64 = 0;
-    while k < n && k < line.len && line[k] == ' ' { k += 1; }
-    return line[k..];
-}
-
-// render_lines renders a line range as blocks. Quotes strip all their
-// '>' levels at once in place, so the render needs no recursion over
-// lines: the only recursion left is the inline renderer over one line.
-fn render_lines(out: u8[>..]&, lines: const u8[:][>..]&, skip: bool[>..]&, ids: u8[>..]&, from: i64, to: i64, o: Options, st: State&) {
-    var i = from;
-    while i < to {
-        let line = lines[i];
-        if skip[i] { i += 1; continue; }
-        if is_blank(line) { i += 1; continue; }
-        let fence_at, fence_char, info = fence_open(line);
-        if fence_at >= 0 {
-            // Collect the body until the close fence or the end.
-            out.append("<pre><code");
-            let word = trim(info);
-            var wend: i64 = 0;
-            while wend < word.len && word[wend] != ' ' && word[wend] != '\t' { wend += 1; }
-            if wend > 0 {
-                out.append(" class=\"language-");
-                var lang: u8[>..] = [];
-                unescape_all(lang, word[..wend]);
-                escape_attr(out, lang[..]);
-                out.append("\"");
-            }
-            out.append(">");
-            let fcount = fence_run_len(line, fence_char);
-            let indent = leading_spaces(line);
-            var k = i + 1;
-            var closed = false;
-            while k < to {
-                if fence_close(lines[k], fence_char, fcount) { closed = true; break; }
-                escape_text(out, strip_indent(lines[k], indent));
-                out.append("\n");
-                k += 1;
-            }
-            out.append("</code></pre>\n");
-            i = k;
-            if closed { i += 1; }
-            continue;
-        }
-        // An HTML block: the lines go out raw, as they stand. A kind 1
-        // to 5 block ends at the line that meets its end condition. A
-        // kind 6 or 7 block ends at a blank line, which stays out.
-        let bkind = if o.escape_html { 0 } else { html_block_kind(line) };
-        if bkind > 0 {
-            var k = i;
-            var last = to - 1;
-            if bkind <= 5 {
-                while k < to {
-                    if html_block_end(bkind, lines[k]) { last = k; break; }
-                    k += 1;
-                }
-            } else {
-                while k < to && !is_blank(lines[k]) { k += 1; }
-                last = k - 1;
-            }
-            var m = i;
-            while m <= last {
-                out.append(lines[m]);
-                out.append("\n");
-                m += 1;
-            }
-            i = last + 1;
-            continue;
-        }
-        if is_hr(line) && setext_level(line) == 0 || (is_hr(line) && leading_spaces(line) < 4) {
-            if leading_spaces(line) < 4 {
-                out.append("<hr />\n");
-                i += 1;
-                continue;
-            }
-        }
-        let level = heading_level(line);
-        if level > 0 {
-            emit_heading(out, ids, atx_text(line, level), level, o, st);
-            i += 1;
-            continue;
-        }
-        if is_quote(line) {
-            // A blockquote. The stripped lines join into paragraphs the
-            // same way the paragraph block joins them: consecutive
-            // non-blank lines are one paragraph.
-            out.append("<blockquote>\n");
-            var j = i;
-            var para: u8[>..] = [];
-            while j < to && is_quote(lines[j]) {
-                let inner = strip_all_quotes(lines[j]);
-                if is_blank(inner) {
-                    if para.len > 0 {
-                        out.append("<p>");
-                        render_inline(out, para[..], o, st);
-                        out.append("</p>\n");
-                        para.clear();
-                    }
-                    j += 1;
-                    continue;
-                }
-                if para.len > 0 { para.push('\n'); }
-                para.append(trim_start(inner));
-                j += 1;
-            }
-            if para.len > 0 {
-                out.append("<p>");
-                render_inline(out, para[..], o, st);
-                out.append("</p>\n");
-            }
-            out.append("</blockquote>\n");
-            i = j;
-            continue;
-        }
-        let lkind, lstart = list_marker(line);
-        if lkind > 0 && !is_hr(line) {
-            // Collect the list lines. The marker kind decides the tag.
-            if lkind == 1 {
-                out.append("<ul>\n");
-            } else {
-                let num = list_number(line);
-                if num == 1 { out.append("<ol>\n"); }
-                else { out.append("<ol start=\""); format(out, num); out.append("\">\n"); }
-            }
-            var j = i;
-            let current_kind = lkind;
-            while j < to {
-                let ikind, istart = list_marker(lines[j]);
-                if ikind != current_kind || is_hr(lines[j]) { break; }
-                // The item text runs to the next item marker or a blank.
-                var item: u8[>..] = [];
-                item.append(lines[j][istart..]);
-                var k = j + 1;
-                while k < to {
-                    let nk, nst = list_marker(lines[k]);
-                    if nk > 0 { break; }
-                    if is_blank(lines[k]) { break; }
-                    if skip[k] { break; }
-                    let sp = leading_spaces(lines[k]);
-                    if sp >= 4 { break; }
-                    if is_quote(lines[k]) || is_hr(lines[k]) || heading_level(lines[k]) > 0 { break; }
-                    let fa, fc, fi = fence_open(lines[k]);
-                    if fa >= 0 { break; }
-                    item.push('\n');
-                    // The indent of the continuation line goes away.
-                    item.append(lines[k][sp..]);
-                    k += 1;
-                }
-                out.append("<li>");
-                var text: const u8[:] = item[..];
-                if o.tasklists && text.len >= 4 && text[0] == '[' && text[2] == ']' && text[3] == ' '
-                   && (text[1] == ' ' || text[1] == 'x' || text[1] == 'X') {
-                    if text[1] == ' ' { out.append("<input type=\"checkbox\" disabled=\"\" /> "); }
-                    else { out.append("<input type=\"checkbox\" checked=\"\" disabled=\"\" /> "); }
-                    text = text[4..];
-                }
-                render_inline(out, text, o, st);
-                out.append("</li>\n");
-                j = k;
-            }
-            out.append(if current_kind == 1 { "</ul>\n" } else { "</ol>\n" });
-            i = j;
-            continue;
-        }
-        // An indented code block: four or more spaces after a blank line
-        // or at the start of the range.
-        if leading_spaces(line) >= 4 {
-            let was_free = i == from || is_blank(lines[i - 1]) || skip[i - 1];
-            if was_free {
-                out.append("<pre><code>");
-                var k = i;
-                var last = i;
-                while k < to && (leading_spaces(lines[k]) >= 4 || is_blank(lines[k])) {
-                    if !is_blank(lines[k]) { last = k; }
-                    k += 1;
-                }
-                var m = i;
-                while m <= last {
-                    if is_blank(lines[m]) {
-                        if lines[m].len > 4 { escape_text(out, lines[m][4..]); }
-                    } else {
-                        escape_text(out, lines[m][4..]);
-                    }
-                    out.append("\n");
-                    m += 1;
-                }
-                out.append("</code></pre>\n");
-                i = last + 1;
-                continue;
-            }
-        }
-        // A table: a header row, a delimiter row and the body rows.
-        if o.tables && i + 1 < to && !skip[i + 1] && line.len > 0 && is_delim_row(lines[i + 1]) {
-            var head: const u8[:][>..] = [];
-            split_cells(head, line);
-            var dcells: const u8[:][>..] = [];
-            split_cells(dcells, lines[i + 1]);
-            if head.len == dcells.len {
-                var aligns: u8[>..] = [];
-                for d in dcells {
-                    let left = d[0] == ':';
-                    let right = d[d.len - 1] == ':';
-                    if left && right { aligns.push('c'); }
-                    else if left { aligns.push('l'); }
-                    else if right { aligns.push('r'); }
-                    else { aligns.push('0'); }
-                }
-                out.append("<table>\n<thead>\n");
-                emit_row(out, head, aligns, "th", o, st);
-                out.append("</thead>\n");
-                var k = i + 2;
-                var first = true;
-                while k < to && !is_blank(lines[k]) && !skip[k] && !is_quote(lines[k])
-                      && heading_level(lines[k]) == 0 {
-                    if first { out.append("<tbody>\n"); first = false; }
-                    var row: const u8[:][>..] = [];
-                    split_cells(row, lines[k]);
-                    emit_row(out, row, aligns, "td", o, st);
-                    k += 1;
-                }
-                if !first { out.append("</tbody>\n"); }
-                out.append("</table>\n");
-                i = k;
-                continue;
-            }
-        }
-        // A paragraph: collect until a blank line or a block start. A
-        // line of = or - under it makes it a heading.
-        var para: u8[>..] = [];
-        var j = i;
-        var setext: i64 = 0;
-        while j < to {
-            let pl = lines[j];
-            if is_blank(pl) || skip[j] { break; }
-            if j > i {
-                let sl = setext_level(pl);
-                if sl > 0 { setext = sl; j += 1; break; }
-            }
-            if j > i {
-                if heading_level(pl) > 0 { break; }
-                if is_hr(pl) && leading_spaces(pl) < 4 { break; }
-                let fk, fc, fi = fence_open(pl);
-                if fk >= 0 { break; }
-                if is_quote(pl) { break; }
-                let mk, ms = list_marker(pl);
-                if mk > 0 { break; }
-                // A kind 1 to 6 block interrupts a paragraph. A kind 7
-                // block does not.
-                if !o.escape_html {
-                    let hk = html_block_kind(pl);
-                    if hk >= 1 && hk <= 6 { break; }
-                }
-            }
-            if para.len > 0 { para.push('\n'); }
-            para.append(if j > i { trim_start(pl) } else { trim_start(pl) });
-            j += 1;
-        }
-        if setext > 0 {
-            emit_heading(out, ids, trim(para[..]), setext, o, st);
-        } else {
-            out.append("<p>");
-            render_inline(out, para[..], o, st);
-            out.append("</p>\n");
-        }
-        i = j;
-    }
 }
 
 fn fence_run_len(line: const u8[:], c: u8) -> i64 {
@@ -656,30 +527,16 @@ fn fence_run_len(line: const u8[:], c: u8) -> i64 {
     return n;
 }
 
-// strip_all_quotes takes every leading '>' level from the line at once.
-// A line with no quote marker gives the line itself.
-fn strip_all_quotes(line: const u8[:]) -> const u8[:] {
-    var cur = line;
-    while true {
-        let sp = leading_spaces(cur);
-        if sp >= cur.len || cur[sp] != '>' { break; }
-        cur = cur[sp + 1..];
-        if cur.len > 0 && cur[0] == ' ' { cur = cur[1..]; }
-        else if cur.len > 0 && cur[0] == '\t' { cur = cur[1..]; }
-    }
-    return cur;
-}
-
 // render_blocks renders the whole document.
 fn render_blocks(out: u8[>..]&, s: const u8[:], o: Options) {
     var lines: const u8[:][>..] = [];
     split_lines(lines, s);
-    var skip: bool[>..] = [];
-    var i: i64 = 0;
-    while i < lines.len { skip.push(false); i += 1; }
+    var bl: Blk[>..] = [];
+    var ln: Ln[>..] = [];
+    var store: u8[>..] = [];
     var st: State = State { .. };
     var ids: u8[>..] = [];
-    collect_defs(lines, skip, o, st);
-    render_lines(out, lines, skip, ids, 0, lines.len, o, st);
-    if o.footnotes { emit_footnotes(out, lines, o, st); }
+    parse_blocks(lines, bl, ln, store, o, st);
+    walk(out, lines, bl, ln, ids, o, st, 0);
+    if o.footnotes { emit_footnotes(out, lines, bl, ln, ids, o, st); }
 }

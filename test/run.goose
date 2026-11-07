@@ -48,16 +48,50 @@ fn test_indented_code() {
 fn test_quote() {
     expect_render("> a\n> b", "<blockquote>\n<p>a\nb</p>\n</blockquote>\n");
     expect_render("> a", "<blockquote>\n<p>a</p>\n</blockquote>\n");
-    // A nested quote flattens to one level in v0.1.0.
-    expect_render("> > deep", "<blockquote>\n<p>deep</p>\n</blockquote>\n");
+    // A quote in a quote nests one level.
+    expect_render("> > deep", "<blockquote>\n<blockquote>\n<p>deep</p>\n</blockquote>\n</blockquote>\n");
+    // A quote holds lists, and a lazy line joins the inner paragraph.
+    expect_render("> - a\n> - b", "<blockquote>\n<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n</blockquote>\n");
+    expect_render("> foo\nbar", "<blockquote>\n<p>foo\nbar</p>\n</blockquote>\n");
 }
 
 fn test_list() {
     expect_render("- a\n- b\n- c", "<ul>\n<li>a</li>\n<li>b</li>\n<li>c</li>\n</ul>\n");
     expect_render("1. a\n2. b", "<ol>\n<li>a</li>\n<li>b</li>\n</ol>\n");
-    expect_render("* a\n+ b", "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n");
+    // A different bullet char starts a new list.
+    expect_render("* a\n+ b", "<ul>\n<li>a</li>\n</ul>\n<ul>\n<li>b</li>\n</ul>\n");
     // An item continues over the next line.
     expect_render("- one\n  two", "<ul>\n<li>one\ntwo</li>\n</ul>\n");
+    // A list in an item nests one level.
+    expect_render("- a\n  - b", "<ul>\n<li>a\n<ul>\n<li>b</li>\n</ul>\n</li>\n</ul>\n");
+    // A blank line between items makes the list loose.
+    expect_render("- a\n\n- b", "<ul>\n<li>\n<p>a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>\n");
+    // A blank line inside an item makes it loose too.
+    expect_render("- a\n\n  b", "<ul>\n<li>\n<p>a</p>\n<p>b</p>\n</li>\n</ul>\n");
+    // A start number other than one goes into the tag.
+    expect_render("5. a", "<ol start=\"5\">\n<li>a</li>\n</ol>\n");
+    // A lazy line cannot start an item past four spaces.
+    expect_render("- a\n - b\n  - c\n   - d\n    - e", "<ul>\n<li>a</li>\n<li>b</li>\n<li>c</li>\n<li>d\n- e</li>\n</ul>\n");
+}
+
+fn test_tabs() {
+    // A tab lines the item content up to the next tab stop.
+    expect_render("-\tfoo", "<ul>\n<li>foo</li>\n</ul>\n");
+    // A tab that lines past the content column makes code in the item.
+    expect_render("-\t\tfoo", "<ul>\n<li>\n<pre><code>  foo\n</code></pre>\n</li>\n</ul>\n");
+    // A tab indent makes code.
+    expect_render("\tfoo", "<pre><code>foo\n</code></pre>\n");
+    // A partly used tab lines the content up to the stop.
+    expect_render("- a\n  \tb", "<ul>\n<li>a\nb</li>\n</ul>\n");
+}
+
+fn test_block_defs() {
+    // A definition holds over two lines.
+    expect_render("[foo]:\n/url\n\n[foo]", "<p><a href=\"/url\">foo</a></p>\n");
+    // A label folds its white space and its case.
+    expect_render("[A  G]: /u\n\n[a\ng]", "<p><a href=\"/u\">a\ng</a></p>\n");
+    // A definition with no reference writes nothing.
+    expect_render("[unused]: /u", "");
 }
 
 fn test_hr() {
@@ -397,6 +431,26 @@ fn test_hostile_time() {
     assert(time_render(m[..]) < 1.0);
 }
 
+// Hostile block input must also render in linear time. A quote nest on
+// one line walks the chain once. A flat list of many items stays
+// linear in the item count. A fence that never closes reads every line
+// once. The deep one-quote-per-line form is quadratic in every
+// implementation of the algorithm, cmark included, so it gets no test.
+fn test_hostile_blocks_time() {
+    let q = repeat("> ", 100000);
+    assert(time_render(q[..]) < 1.0);
+    let l = repeat("- a\n", 100000);
+    assert(time_render(l[..]) < 1.0);
+    let o = repeat("1. ", 100000);
+    assert(time_render(o[..]) < 1.0);
+    let f = repeat("    x\n", 100000);
+    assert(time_render(f[..]) < 1.0);
+    let h = repeat("\n", 100000);
+    assert(time_render(h[..]) < 1.0);
+    let n = repeat("x\n\n", 50000);
+    assert(time_render(n[..]) < 1.0);
+}
+
 fn main() {
     test_heading();
     test_paragraph();
@@ -436,6 +490,7 @@ fn main() {
     test_bracket_stack();
     test_smart_after_marker();
     test_hostile_time();
+    test_hostile_blocks_time();
     print("all tests passed");
     return 0;
 }

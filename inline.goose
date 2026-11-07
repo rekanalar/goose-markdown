@@ -16,6 +16,7 @@ import std;
 import escape;
 import types;
 import unicode;
+import unicode_fold;
 import delims;
 import entities;
 import entity;
@@ -44,16 +45,50 @@ fn lower(c: u8) -> u8 {
     return c;
 }
 
-// label_eq compares two link labels with no regard for case or for the
-// space around them.
-fn label_eq(a: const u8[:], b: const u8[:]) -> bool {
-    let x = trim(a);
-    let y = trim(b);
-    if x.len != y.len { return false; }
+// label_cp gives the folded code point of the character at i and the
+// place after it. A broken byte gives the replacement mark.
+fn label_cp(s: const u8[:], i: i64) -> i64, i64 {
+    let c = s[i] as i64;
+    if c < 0x80 {
+        var cp = c;
+        if cp >= 65 && cp <= 90 { cp += 32; }
+        return cp, i + 1;
+    }
+    var adv: i64 = 2;
+    if c >= 0xF0 && c < 0xF8 { adv = 4; }
+    else if c >= 0xE0 { adv = 3; }
+    return fold_cp(cp_at(s, i)), i + adv;
+}
+
+// fold_label writes the label in the compare form: lower case, with
+// each run of white space as one space and no space at the ends.
+fn fold_label(out: u8[>..]&, t: const u8[:]) {
+    var pending = false;
     var i: i64 = 0;
-    while i < x.len {
-        if lower(x[i]) != lower(y[i]) { return false; }
-        i += 1;
+    while i < t.len {
+        let cp, ni = label_cp(t, i);
+        i = ni;
+        if is_uni_space(cp) {
+            if out.len > 0 { pending = true; }
+            continue;
+        }
+        if pending { out.push(' '); pending = false; }
+        push_utf8(out, cp);
+    }
+}
+
+// label_eq compares two link labels with no regard for case or for
+// white space runs.
+fn label_eq(a: const u8[:], b: const u8[:]) -> bool {
+    var x: u8[>..] = [];
+    var y: u8[>..] = [];
+    fold_label(x, a);
+    fold_label(y, b);
+    if x.len != y.len { return false; }
+    var k: i64 = 0;
+    while k < x.len {
+        if x[k] != y[k] { return false; }
+        k += 1;
     }
     return true;
 }
@@ -272,6 +307,10 @@ fn autolink_len(s: const u8[:], i: i64) -> i64 {
     for x in inner { if x <= ' ' || x == '<' { plain = false; } }
     if !plain { return 0; }
     if scheme_len(inner) > 0 { return close + 1 - i; }
+    // A backslash disqualifies an email autolink.
+    var has_bs = false;
+    for x in inner { if x == '\\' { has_bs = true; } }
+    if has_bs { return 0; }
     let at = find_char(inner, 0, '@');
     if at > 0 && at + 1 < inner.len { return close + 1 - i; }
     return 0;
@@ -499,22 +538,31 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
             }
             if closed {
                 push_text(toks, ts, i);
-                // A code span trims one space on each side when both
-                // sides have one and the span is not all spaces.
-                var a = run_end;
-                var b = j;
-                if b - a >= 2 && s[a] == ' ' && s[b - 1] == ' ' {
+                // The content keeps its line-end spaces; a line ending
+                // becomes one space. One space goes off each end when
+                // both ends hold white space and the span is not all
+                // white space.
+                var buf: u8[>..] = [];
+                var q = run_end;
+                while q < j {
+                    let ch = s[q];
+                    if ch == '\n' || ch == '\r' { buf.push(' '); } else { buf.push(ch); }
+                    q += 1;
+                }
+                var a2: i64 = 0;
+                var b2 = buf.len;
+                if b2 - a2 >= 2 && is_space(buf[0]) && is_space(buf[b2 - 1]) {
                     var all_space = true;
-                    var q = a;
-                    while q < b { if s[q] != ' ' { all_space = false; } q += 1; }
-                    if !all_space { a += 1; b -= 1; }
+                    var w = a2;
+                    while w < b2 { if !is_space(buf[w]) { all_space = false; } w += 1; }
+                    if !all_space { a2 = 1; b2 -= 1; }
                 }
                 let p0 = pre.len;
                 pre.append("<code>");
-                escape_text(pre, s[a..b]);
+                escape_text(pre, buf[a2..b2]);
                 pre.append("</code>");
                 let q0 = plain.len;
-                plain.append(s[a..b]);
+                plain.append(buf[a2..b2]);
                 push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = j + run_len;
                 ts = i;
@@ -586,15 +634,18 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
                 let inner = s[i + 1..close];
                 push_text(toks, ts, i);
                 let p0 = pre.len;
+                var shown: u8[>..] = [];
                 if scheme_len(inner) > 0 {
+                    shown.append(inner);
                     emit_open(pre, inner, "");
                 } else {
-                    emit_open(pre, str("mailto:", inner), "");
+                    shown.append(inner);
+                    emit_open(pre, str("mailto:", shown[..]), "");
                 }
-                escape_text(pre, inner);
+                escape_text(pre, shown[..]);
                 pre.append("</a>");
                 let q0 = plain.len;
-                plain.append(inner);
+                plain.append(shown[..]);
                 push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = close + 1;
                 ts = i;
@@ -734,9 +785,9 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
             i += 1;
         }
     }
-    // The spaces at the end of the span do not show.
+    // The spaces and tabs at the end of the span do not show.
     var tail = s.len;
-    while tail > ts && s[tail - 1] == ' ' { tail -= 1; }
+    while tail > ts && (s[tail - 1] == ' ' || s[tail - 1] == '\t') { tail -= 1; }
     push_text(toks, ts, tail);
     process_delims(toks, dl, 0, dl.len);
     render_toks(out, s, toks, pre, plain, o.smart);
