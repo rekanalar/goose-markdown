@@ -133,6 +133,16 @@ fn test_escapes() {
     expect_render("x < y", "<p>x &lt; y</p>\n");
 }
 
+fn test_label_fold() {
+    // The full case fold: one letter folds to a run of letters.
+    expect_render("[ẞ]\n\n[SS]: /url", "<p><a href=\"/url\">ẞ</a></p>\n");
+    expect_render("[ß]\n\n[ss]: /url", "<p><a href=\"/url\">ß</a></p>\n");
+    // The simple fold over other scripts.
+    expect_render("[ΑΓΩ]\n\n[αγω]: /φου", "<p><a href=\"/%CF%86%CE%BF%CF%85\">ΑΓΩ</a></p>\n");
+    // White space runs fold to one space.
+    expect_render("[foo  bar]\n\n[FOO\nBAR]: /u", "<p><a href=\"/u\">foo  bar</a></p>\n");
+}
+
 fn test_url_escape() {
     // A quote in a URL comes out escaped.
     var out: u8[>..] = [];
@@ -237,6 +247,27 @@ fn test_autolinks() {
     expect_with("www.a.example", o, "<p><a href=\"http://www.a.example\">www.a.example</a></p>\n");
     expect_with("(http://a.example/b)", o, "<p>(<a href=\"http://a.example/b\">http://a.example/b</a>)</p>\n");
     expect_with("nohttp://a.example", o, "<p>nohttp://a.example</p>\n");
+    // A bare email address becomes a mailto link.
+    expect_with("mail me at a.b@example.com now", o, "<p>mail me at <a href=\"mailto:a.b@example.com\">a.b@example.com</a> now</p>\n");
+    // A short domain of one label does not link.
+    expect_with("write a@b nothing", o, "<p>write a@b nothing</p>\n");
+    // The trailing dot stays outside.
+    expect_with("x@example.io.", o, "<p><a href=\"mailto:x@example.io\">x@example.io</a>.</p>\n");
+    // The parens stay balanced.
+    expect_with("(see foo@bar.com)", o, "<p>(see <a href=\"mailto:foo@bar.com\">foo@bar.com</a>)</p>\n");
+    // Two labels with a country ending work.
+    expect_with("no-reply@example.co.uk", o, "<p><a href=\"mailto:no-reply@example.co.uk\">no-reply@example.co.uk</a></p>\n");
+    // Two marks give no link.
+    expect_with("e@x@y.com here", o, "<p>e@x@y.com here</p>\n");
+    // An unknown ending gives no link.
+    expect_with("foo@bar.company ok", o, "<p>foo@bar.company ok</p>\n");
+    // Marks of the local part may sit inside, not at the ends.
+    expect_with("stem a.b+c@mail.example.com end", o, "<p>stem <a href=\"mailto:a.b+c@mail.example.com\">a.b+c@mail.example.com</a> end</p>\n");
+    // An address inside a longer word does not link.
+    expect_with("dot a@b.example.com.another longer", o, "<p>dot a@b.example.com.another longer</p>\n");
+    expect_with("at mark x@y.example.com.z no", o, "<p>at mark x@y.example.com.z no</p>\n");
+    // The comma after the address stays outside.
+    expect_with("trailing foo@bar.com, ok", o, "<p>trailing <a href=\"mailto:foo@bar.com\">foo@bar.com</a>, ok</p>\n");
 }
 
 fn test_tables() {
@@ -431,6 +462,33 @@ fn test_hostile_time() {
     assert(time_render(m[..]) < 1.0);
 }
 
+// time_links renders with the autolinks flag on and gives the seconds.
+fn time_links(text: const u8[:]) -> f64 {
+    var out: u8[>..] = [];
+    let o = markdown::Options { autolinks: true, .. };
+    let t0 = clock();
+    markdown::render_with(out, text, o);
+    return clock() - t0;
+}
+
+// A text of many marks must scan in linear time, matched or not.
+fn test_hostile_email_time() {
+    // A long run of close parens after one address must stay linear.
+    var p: u8[>..] = [];
+    p.append("a@b.com ");
+    var q: i64 = 0;
+    while q < 100000 { p.push(')'); q += 1; }
+    assert(time_links(p[..]) < 1.0);
+    let a = repeat("word@ ", 50000);
+    assert(time_links(a[..]) < 1.0);
+    let b = repeat("a.b@c.d ", 50000);
+    assert(time_links(b[..]) < 1.0);
+    let c = repeat("a@b.com ", 50000);
+    assert(time_links(c[..]) < 1.0);
+    let d = repeat("@@@@@ ", 50000);
+    assert(time_links(d[..]) < 1.0);
+}
+
 // Hostile block input must also render in linear time. A quote nest on
 // one line walks the chain once. A flat list of many items stays
 // linear in the item count. A fence that never closes reads every line
@@ -465,6 +523,7 @@ fn main() {
     test_image();
     test_hard_break();
     test_escapes();
+    test_label_fold();
     test_url_escape();
     test_windows_endings();
     test_raw_html_policy();
@@ -491,6 +550,7 @@ fn main() {
     test_smart_after_marker();
     test_hostile_time();
     test_hostile_blocks_time();
+    test_hostile_email_time();
     print("all tests passed");
     return 0;
 }

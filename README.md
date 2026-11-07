@@ -26,7 +26,7 @@ Tabs line the content up to the tab stops, as the spec wants.
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v0.6.0";
+import markdown from "rekanalar/goose-markdown@v1.0.0";
 ```
 
 ## API
@@ -43,7 +43,7 @@ import markdown from "rekanalar/goose-markdown@v0.6.0";
 | `anchors` | `id` on each heading, such as `hello-world`; a copy gets `-1`, `-2` | goldmark `WithAutoHeadingID`, Python `toc` |
 | `strikethrough` | `~~text~~` gives `<del>` | pulldown-cmark `ENABLE_STRIKETHROUGH` |
 | `tasklists` | `[ ]` and `[x]` at the start of an item give a checkbox | `ENABLE_TASKLISTS` |
-| `autolinks` | bare `http://`, `https://` and `www.` addresses give links | goldmark `Linkify` |
+| `autolinks` | bare `http://`, `https://`, `www.` and email addresses give links | goldmark `Linkify`, markdown-it `linkify`, pulldown-cmark `ENABLE_GFM` |
 | `tables` | pipe tables, with column alignment | `ENABLE_TABLES` |
 | `footnotes` | `[^label]` and `[^label]: text` | `ENABLE_FOOTNOTES` |
 | `smart` | curly quotes, `--` as en dash, `---` as em dash, `...` as an ellipsis | `ENABLE_SMART_PUNCTUATION` |
@@ -61,12 +61,9 @@ long list runs and the pathological inline cases.
 
 ## Limits
 
-Of the 652 examples of CommonMark 0.31.2, 651 pass (`test/spec.goose`)
-on both supported Goose versions. One example stays open:
-
-- Example 540 needs the full Unicode case fold, where `ẞ` matches `SS`.
-  The label compare uses the simple fold, where one letter maps to one
-  letter. `ΑΓΩ` against `αγω` works. `ẞ` against `ss` does not.
+The whole suite passes: 652 of the 652 examples of CommonMark 0.31.2
+(`test/spec.goose`) on both supported Goose versions. The audit against
+the reference libraries holds these limits:
 
 - Raw HTML from the input goes out raw. That is what CommonMark wants.
   The flag `escape_html` turns the raw HTML back into escaped text.
@@ -79,6 +76,21 @@ on both supported Goose versions. One example stays open:
 
 - The `smart` option reads the quote marks of one text run. It treats a
   quote after an opening marker as an opening quote.
+
+- The email autolink checks the last domain label against a short
+  list. The list holds the common endings and the country endings of
+  two letters. An ending outside the list gives no link. `cmark-gfm`
+  reads the whole TLD list.
+
+- Heading attributes, definition lists, math blocks and YAML
+  metadata blocks stay out. So do admonitions, attribute lists,
+  wikilinks, `nl2br`, sane lists and the CJK line break options.
+  Each is an opt-in extension of one library, with no seat in the
+  CommonMark core.
+
+- The `mangle` option of `marked` stays out. It obscures email
+  addresses in the output. A caller that needs it can pre-process the
+  input.
 
 ## Test
 

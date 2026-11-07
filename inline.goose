@@ -45,23 +45,19 @@ fn lower(c: u8) -> u8 {
     return c;
 }
 
-// label_cp gives the folded code point of the character at i and the
-// place after it. A broken byte gives the replacement mark.
+// label_cp gives the code point of the character at i and the place
+// after it. A broken byte gives the replacement mark.
 fn label_cp(s: const u8[:], i: i64) -> i64, i64 {
     let c = s[i] as i64;
-    if c < 0x80 {
-        var cp = c;
-        if cp >= 65 && cp <= 90 { cp += 32; }
-        return cp, i + 1;
-    }
+    if c < 0x80 { return c, i + 1; }
     var adv: i64 = 2;
     if c >= 0xF0 && c < 0xF8 { adv = 4; }
     else if c >= 0xE0 { adv = 3; }
-    return fold_cp(cp_at(s, i)), i + adv;
+    return cp_at(s, i), i + adv;
 }
 
-// fold_label writes the label in the compare form: lower case, with
-// each run of white space as one space and no space at the ends.
+// fold_label writes the label in the compare form: the full case fold,
+// with each run of white space as one space and no space at the ends.
 fn fold_label(out: u8[>..]&, t: const u8[:]) {
     var pending = false;
     var i: i64 = 0;
@@ -73,7 +69,16 @@ fn fold_label(out: u8[>..]&, t: const u8[:]) {
             continue;
         }
         if pending { out.push(' '); pending = false; }
-        push_utf8(out, cp);
+        // The full fold first: one letter can fold to a run of letters.
+        let si = fold_special(cp);
+        if si >= 0 {
+            let a = FOLD_SPECIAL_AT[si];
+            let b = FOLD_SPECIAL_AT[si + 1];
+            var k = a;
+            while k < b { out.push(FOLD_SPECIAL_TO[k]); k += 1; }
+        } else {
+            push_utf8(out, fold_cp(cp));
+        }
     }
 }
 
@@ -316,6 +321,122 @@ fn autolink_len(s: const u8[:], i: i64) -> i64 {
     return 0;
 }
 
+// is_stem_byte holds for the bytes of an email stem: alnum and the
+// four marks the GFM stem allows.
+fn is_stem_byte(c: u8) -> bool {
+    return is_alnum(c) || c == '.' || c == '-' || c == '_' || c == '+';
+}
+
+// is_email_before holds when the byte before a stem forbids the match.
+fn is_email_before(b: u8) -> bool {
+    return is_alnum(b) || b == '@' || b == '.' || b == '-' || b == '_' || b == '+';
+}
+
+// is_email_mark holds for the marks an email local part may not end with.
+fn is_email_mark(c: u8) -> bool {
+    return c == '.' || c == '-' || c == '_' || c == '+';
+}
+
+// known_ending holds when the last domain label is a plausible ending.
+// A label of two letters is a country ending. The list holds the
+// common endings that GFM names.
+fn known_ending(w: const u8[:]) -> bool {
+    if w.len == 2 && ((w[0] >= 'a' && w[0] <= 'z') || (w[0] >= 'A' && w[0] <= 'Z'))
+       && ((w[1] >= 'a' && w[1] <= 'z') || (w[1] >= 'A' && w[1] <= 'Z')) {
+        return true;
+    }
+    let list: const u8[:] = "com org net edu gov mil int co io ai info biz app dev xyz me";
+    var start: i64 = 0;
+    var k: i64 = 0;
+    while k < list.len {
+        if list[k] == ' ' {
+            if k - start == w.len {
+                var hit = true;
+                var m: i64 = 0;
+                while m < w.len {
+                    var a = w[m];
+                    if a >= 'A' && a <= 'Z' { a += 32; }
+                    if a != list[start + m] { hit = false; break; }
+                    m += 1;
+                }
+                if hit { return true; }
+            }
+            start = k + 1;
+        }
+        k += 1;
+    }
+    return false;
+}
+
+// email_end gives the end of the bare email address that starts at i,
+// or i when none starts there. The rules follow the GFM spec: the stem
+// holds one @, the local part carries no mark at its ends, the domain
+// holds two labels or more, and the last label has a known ending.
+fn email_end(s: const u8[:], i: i64) -> i64 {
+    if i > 0 && is_email_before(s[i - 1]) { return i; }
+    var at: i64 = -1;
+    var e = i;
+    while e < s.len {
+        let c = s[e];
+        if c == ' ' || c == '\t' || c == '\n' || c == '<' || c == '>' { break; }
+        if c == '@' {
+            if at >= 0 { return i; }
+            at = e;
+        } else if !is_stem_byte(c) {
+            // Any other byte ends the stem. The address may still sit
+            // before it.
+            break;
+        }
+        e += 1;
+    }
+    if at < 0 || at == i || at + 1 >= e { return i; }
+    if is_email_mark(s[at - 1]) || is_email_mark(s[at + 1]) { return i; }
+    // The trailing punctuation comes off the end. A run of ) comes off
+    // while its parens hold no open one.
+    var end = e;
+    var open: i64 = 0;
+    var close: i64 = 0;
+    var m = i;
+    while m < end {
+        if s[m] == '(' { open += 1; }
+        if s[m] == ')' { close += 1; }
+        m += 1;
+    }
+    while end > at + 2 {
+        let c = s[end - 1];
+        if c == '?' || c == '!' || c == '.' || c == ',' || c == ':' || c == ';'
+           || c == '*' || c == '_' || c == '~' {
+            end -= 1;
+            continue;
+        }
+        if c == ')' && close > open {
+            close -= 1;
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    // The domain: labels of alnum and -, joined by dots.
+    var label_start = at + 1;
+    var labels: i64 = 0;
+    var k = at + 1;
+    while k < end {
+        let c = s[k];
+        if c == '.' {
+            if k == label_start || k - label_start > 63 || s[k - 1] == '-' { return i; }
+            labels += 1;
+            label_start = k + 1;
+        } else if !is_alnum(c) && c != '-' {
+            return i;
+        }
+        k += 1;
+    }
+    if labels < 1 || label_start == end || end - label_start > 63 { return i; }
+    if s[end - 1] == '-' || end - label_start < 2 { return i; }
+    if !known_ending(s[label_start..end]) { return i; }
+    return end;
+}
+
 // bare_end gives the end of a bare address that starts at i, or i when
 // no address starts there. The end drops the trailing punctuation.
 fn bare_end(s: const u8[:], i: i64) -> i64 {
@@ -327,21 +448,24 @@ fn bare_end(s: const u8[:], i: i64) -> i64 {
     var e = i + head;
     while e < s.len && !is_space(s[e]) && s[e] != '<' { e += 1; }
     if e == i + head { return i; }
+    // Count the parens once. The trim stays linear when a long run of
+    // ) follows the address.
+    var open: i64 = 0;
+    var close: i64 = 0;
+    var m = i;
+    while m < e {
+        if s[m] == '(' { open += 1; }
+        if s[m] == ')' { close += 1; }
+        m += 1;
+    }
     while e > i + head {
         let c = s[e - 1];
         if c == '?' || c == '!' || c == '.' || c == ',' || c == ':' || c == '*' || c == '_'
             || c == '~' || c == '\'' || c == '"' || c == ';' {
             e -= 1;
-        } else if c == ')' {
-            var open: i64 = 0;
-            var close: i64 = 0;
-            var m = i;
-            while m < e {
-                if s[m] == '(' { open += 1; }
-                if s[m] == ')' { close += 1; }
-                m += 1;
-            }
-            if close > open { e -= 1; } else { break; }
+        } else if c == ')' && close > open {
+            close -= 1;
+            e -= 1;
         } else {
             break;
         }
@@ -771,6 +895,25 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
                 let p0 = pre.len;
                 if s[i] == 'w' { emit_open(pre, str("http://", s[i..e]), ""); }
                 else { emit_open(pre, s[i..e], ""); }
+                escape_text(pre, s[i..e]);
+                pre.append("</a>");
+                let q0 = plain.len;
+                plain.append(s[i..e]);
+                push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
+                i = e;
+                ts = i;
+            } else {
+                i += 1;
+            }
+        } else if o.autolinks && is_stem_byte(c)
+                  && (i == 0 || !is_email_before(s[i - 1])) {
+            // A bare email address. The check reads one stem, so the
+            // time stays linear in the text.
+            let e = email_end(s, i);
+            if e > i {
+                push_text(toks, ts, i);
+                let p0 = pre.len;
+                emit_open(pre, str("mailto:", s[i..e]), "");
                 escape_text(pre, s[i..e]);
                 pre.append("</a>");
                 let q0 = plain.len;
