@@ -17,6 +17,8 @@ import escape;
 import types;
 import unicode;
 import delims;
+import entities;
+import entity;
 
 fn is_space(c: u8) -> bool { return c == ' ' || c == '\n' || c == '\t'; }
 
@@ -321,16 +323,6 @@ fn emit_open(out: u8[>..]&, url: const u8[:], title: const u8[:]) {
     out.append(">");
 }
 
-// unescape_bs writes the text with each backslash escape resolved.
-fn unescape_bs(out: u8[>..]&, t: const u8[:]) {
-    var i: i64 = 0;
-    while i < t.len {
-        if t[i] == '\\' && i + 1 < t.len && is_punct(t[i + 1]) { i += 1; }
-        out.push(t[i]);
-        i += 1;
-    }
-}
-
 // label_end gives the place of the ] that ends a link label that starts
 // at from, or -1. A label holds no unescaped bracket and at most 999
 // bytes.
@@ -558,6 +550,23 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
                 ts = run_end;
             }
             i = run_end;
+        } else if c == '&' {
+            var ecp: i64[2] = [0, 0];
+            let en = entity_at(s, i, ecp);
+            if en > 0 {
+                push_text(toks, ts, i);
+                var chars: u8[>..] = [];
+                push_entity(chars, ecp);
+                let p0 = pre.len;
+                escape_text(pre, chars[..]);
+                let q0 = plain.len;
+                plain.append(chars[..]);
+                push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
+                i += en;
+                ts = i;
+            } else {
+                i += 1;
+            }
         } else if c == '<' {
             // A raw tag goes out as it stands. The tag rule runs before
             // the autolink rule. The two forms never overlap.
@@ -672,11 +681,11 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
                 var ub: u8[>..] = [];
                 var tb: u8[>..] = [];
                 if didx >= 0 {
-                    unescape_bs(ub, st.defs[didx].url);
-                    unescape_bs(tb, st.defs[didx].title);
+                    unescape_all(ub, st.defs[didx].url);
+                    unescape_all(tb, st.defs[didx].title);
                 } else {
-                    unescape_bs(ub, uu);
-                    unescape_bs(tb, tt);
+                    unescape_all(ub, uu);
+                    unescape_all(tb, tt);
                 }
                 let p0 = pre.len;
                 if image {

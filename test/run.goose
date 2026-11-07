@@ -321,6 +321,20 @@ fn test_smart_after_marker() {
     assert(out == "<p><em>“foo”</em> and <a href=\"/u\">“bar”</a></p>\n");
 }
 
+fn test_entities() {
+    expect_render("&copy; &amp; &AElig; &Dcaron;", "<p>© &amp; Æ Ď</p>\n");
+    expect_render("&#35; &#1234; &#0;", "<p># Ӓ �</p>\n");
+    expect_render("&#X22; &#xcab;", "<p>&quot; ಫ</p>\n");
+    expect_render("&nbsp &x; &#; &#x;", "<p>&amp;nbsp &amp;x; &amp;#; &amp;#x;</p>\n");
+    expect_render("&#87654321; &ThisIsNotDefined;", "<p>&amp;#87654321; &amp;ThisIsNotDefined;</p>\n");
+    expect_render("&#42;foo&#42;", "<p>*foo*</p>\n");
+    expect_render("`f&ouml;`", "<p><code>f&amp;ouml;</code></p>\n");
+    expect_render("[foo](/f&ouml; \"f&ouml;\")", "<p><a href=\"/f%C3%B6\" title=\"fö\">foo</a></p>\n");
+    expect_render("[a](url &quot;tit&quot;)", "<p>[a](url &quot;tit&quot;)</p>\n");
+    expect_render("``` f&ouml;\nx\n```", "<pre><code class=\"language-fö\">x\n</code></pre>\n");
+    expect_render("&#xD800; &#x110000; &#9;", "<p>� � \t</p>\n");
+}
+
 fn test_bracket_stack() {
     // Emphasis lives inside the link text, and does not cross it.
     expect_render("[link *foo **bar** `#`*](/uri)", "<p><a href=\"/uri\">link <em>foo <strong>bar</strong> <code>#</code></em></a></p>\n");
@@ -377,6 +391,8 @@ fn test_hostile_time() {
     assert(time_render(h[..]) < 1.0);
     let k = repeat("[a](b 'c ", 50000);
     assert(time_render(k[..]) < 1.0);
+    let n = repeat("&aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20000);
+    assert(time_render(n[..]) < 1.0);
     let m = repeat("(www.", 50000);
     assert(time_render(m[..]) < 1.0);
 }
@@ -416,6 +432,7 @@ fn main() {
     test_raw_html();
     test_escape_html_option();
     test_emphasis_stack();
+    test_entities();
     test_bracket_stack();
     test_smart_after_marker();
     test_hostile_time();

@@ -404,7 +404,9 @@ fn render_lines(out: u8[>..]&, lines: const u8[:][>..]&, skip: bool[>..]&, ids: 
             while wend < word.len && word[wend] != ' ' && word[wend] != '\t' { wend += 1; }
             if wend > 0 {
                 out.append(" class=\"language-");
-                escape_attr(out, word[..wend]);
+                var lang: u8[>..] = [];
+                unescape_all(lang, word[..wend]);
+                escape_attr(out, lang[..]);
                 out.append("\"");
             }
             out.append(">");

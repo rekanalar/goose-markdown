@@ -20,7 +20,7 @@ Text that only looks like a tag still comes out escaped. Pure Goose, no C.
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v0.4.0";
+import markdown from "rekanalar/goose-markdown@v0.5.0";
 ```
 
 ## API
@@ -54,7 +54,7 @@ The renderer never fails on content. Every input renders to some output.
 ## Limits
 
 The renderer does not pass the whole CommonMark suite. Of the 652
-examples of CommonMark 0.31.2, 527 pass (`test/spec.goose`). These parts
+examples of CommonMark 0.31.2, 541 pass (`test/spec.goose`). These parts
 are open:
 
 - An HTML block inside a block quote or a list item renders as text.
@@ -63,7 +63,6 @@ are open:
   The flag `escape_html` turns the raw HTML back into escaped text.
   A caller that renders untrusted input should set it, or sanitize the
   output itself.
-- Entity and numeric references (`&copy;`, `&#42;`) are not decoded.
 - Lists do not nest. An item holds one paragraph of text. Loose lists
   and a list inside a quote do not work.
 - A quote holds paragraphs only. A heading, a list or a code block
@@ -71,9 +70,10 @@ are open:
 - Tabs are not expanded to columns.
 - Emphasis, links and images follow the delimiter and bracket rules of
   the spec. They run in linear time.
-- Four link examples stay open. Two need entities in a destination or a
-  title (503, 506). One needs the case fold of a label (540). One needs a
-  definition label over two lines (541).
+- Character references (`&copy;`, `&#42;`) are decoded in text and in
+  destinations. They are decoded in titles and info strings too.
+- Two link examples stay open. One needs the case fold of a label (540).
+  One needs a definition label over two lines (541).
 - Three examples about definitions with a bracket in the label stay open
   (547, 548, 590).
 - Heading ids of `anchors` keep the text of the heading as plain
