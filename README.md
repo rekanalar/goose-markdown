@@ -27,12 +27,19 @@ import markdown from "rekanalar/goose-markdown@v0.1.1";
 
 The renderer never fails on content. Every input renders to some output.
 Tables, footnotes, reference links and raw HTML blocks are out of scope
-for v0.1.0. An HTML block in the input renders as escaped text.
+for v0.1.1. An HTML block in the input renders as escaped text.
 
 ```goose
 var out: u8[>..] = [];
 markdown::render(out, "# Title");
 print(out);  // <h1>Title</h1>
+```
+
+## Test
+
+```bash
+goose run test/run.goose
+goose run examples/render.goose
 ```
 
 ## License
