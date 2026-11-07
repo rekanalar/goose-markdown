@@ -51,15 +51,6 @@ print(out);  // <h1 id="title">Title</h1>
 
 The renderer never fails on content. Every input renders to some output.
 
-## Changes in v0.3.0
-
-- Before: raw HTML came out escaped. `<b>` gave `&lt;b&gt;`.
-  Now: the six forms of a tag and the seven HTML block kinds come out
-  raw. This breaks callers that relied on the escape.
-- Before: `<div>` started a paragraph. Now: it starts an HTML block.
-- New: a tag binds more tightly than emphasis and links.
-- New: the flag `escape_html` escapes the raw HTML of the input.
-
 ## Limits
 
 The renderer does not pass the whole CommonMark suite. Of the 652
