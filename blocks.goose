@@ -508,11 +508,14 @@ fn emit_footnotes(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln
             k -= 1;
         }
         var m: i64 = 0;
-        while m < cut { out.push(tmp[m]); m += 1; }
+        // No paragraph in the body: the backlink goes after the last
+        // block, as cmark-gfm puts it.
+        let at = if cut < 0 { tmp.len } else { cut };
+        while m < at { out.push(tmp[m]); m += 1; }
         out.append(" <a href=\"#fnref-");
         escape_attr(out, label);
         out.append("\">\xe2\x86\xa9</a>");
-        m = cut;
+        m = at;
         while m < tmp.len { out.push(tmp[m]); m += 1; }
         out.append("</li>\n");
         n += 1;

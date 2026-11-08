@@ -283,6 +283,13 @@ fn test_footnotes() {
     expect_with("Text[^b] and[^a].\n\n[^a]: First.\n[^b]: Second\n  more.", o, "<p>Text<sup class=\"footnote-reference\"><a href=\"#fn-b\" id=\"fnref-b\">1</a></sup> and<sup class=\"footnote-reference\"><a href=\"#fn-a\" id=\"fnref-a\">2</a></sup>.</p>\n<section class=\"footnotes\">\n<ol>\n<li id=\"fn-b\">\n<p>Second\nmore. <a href=\"#fnref-b\">↩</a></p>\n</li>\n<li id=\"fn-a\">\n<p>First. <a href=\"#fnref-a\">↩</a></p>\n</li>\n</ol>\n</section>\n");
     // An unknown note stays text, and an unused note makes no output.
     expect_with("x[^nope]\n\n[^u]: unused", o, "<p>x[^nope]</p>\n");
+    // A body with no paragraph holds no close tag. The backlink goes
+    // after the last block, as cmark-gfm puts it. The old code read
+    // tmp[-1] here.
+    expect_with("x[^a]\n\n[^a]:\n", o, "<p>x<sup class=\"footnote-reference\"><a href=\"#fn-a\" id=\"fnref-a\">1</a></sup></p>\n<section class=\"footnotes\">\n<ol>\n<li id=\"fn-a\">\n <a href=\"#fnref-a\">↩</a></li>\n</ol>\n</section>\n");
+    expect_with("x[^a]\n\n[^a]: # head\n", o, "<p>x<sup class=\"footnote-reference\"><a href=\"#fn-a\" id=\"fnref-a\">1</a></sup></p>\n<section class=\"footnotes\">\n<ol>\n<li id=\"fn-a\">\n<h1>head</h1>\n <a href=\"#fnref-a\">↩</a></li>\n</ol>\n</section>\n");
+    expect_with("x[^a]\n\n[^a]:     code\n", o, "<p>x<sup class=\"footnote-reference\"><a href=\"#fn-a\" id=\"fnref-a\">1</a></sup></p>\n<section class=\"footnotes\">\n<ol>\n<li id=\"fn-a\">\n<pre><code> code\n</code></pre>\n <a href=\"#fnref-a\">↩</a></li>\n</ol>\n</section>\n");
+    expect_with("x[^a]\n\n[^a]: - item\n", o, "<p>x<sup class=\"footnote-reference\"><a href=\"#fn-a\" id=\"fnref-a\">1</a></sup></p>\n<section class=\"footnotes\">\n<ol>\n<li id=\"fn-a\">\n<ul>\n<li>item</li>\n</ul>\n <a href=\"#fnref-a\">↩</a></li>\n</ol>\n</section>\n");
 }
 
 fn test_smart() {
