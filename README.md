@@ -26,7 +26,7 @@ Tabs line the content up to the tab stops, as the spec wants.
 Add this to the root file of the program that uses it:
 
 ```goose
-import markdown from "rekanalar/goose-markdown@v1.1.0";
+import markdown from "rekanalar/goose-markdown@v1.1.1";
 ```
 
 ## API
