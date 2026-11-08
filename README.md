@@ -40,14 +40,14 @@ import markdown from "rekanalar/goose-markdown@v1.0.0";
 
 | Flag | Extension | Same as |
 |---|---|---|
-| `anchors` | `id` on each heading, such as `hello-world`; a copy gets `-1`, `-2` | goldmark `WithAutoHeadingID`, Python `toc` |
+| `anchors` | `id` on each heading, such as `hello-world`; a copy gets `-1`, `-2` | goldmark `WithAutoHeadingID` and Python `toc`; `toc` writes `_1` for a copy |
 | `strikethrough` | `~~text~~` gives `<del>` | pulldown-cmark `ENABLE_STRIKETHROUGH` |
 | `tasklists` | `[ ]` and `[x]` at the start of an item give a checkbox | `ENABLE_TASKLISTS` |
 | `autolinks` | bare `http://`, `https://`, `www.` and email addresses give links | goldmark `Linkify`, markdown-it `linkify`, pulldown-cmark `ENABLE_GFM` |
 | `tables` | pipe tables, with column alignment | `ENABLE_TABLES` |
 | `footnotes` | `[^label]` and `[^label]: text` | `ENABLE_FOOTNOTES` |
 | `smart` | curly quotes, `--` as en dash, `---` as em dash, `...` as an ellipsis | `ENABLE_SMART_PUNCTUATION` |
-| `escape_html` | escape the raw HTML of the input instead of writing it out | cmark `CMARK_OPT_SAFE`, goldmark without `html.WithUnsafe`, `markdown-it` with `html: false` |
+| `escape_html` | escape the raw HTML of the input instead of writing it out | `markdown-it` with `html: false` escapes it too. cmark `CMARK_OPT_SAFE` and `goldmark` omit the HTML instead. |
 
 ```goose
 var out: u8[>..] = [];
@@ -70,27 +70,36 @@ the reference libraries holds these limits:
   A caller that renders untrusted input should set it, or sanitize the
   output itself.
 
-- A footnote holds its whole block content, and the backlink goes
-  before the close tag of the last paragraph. The backlink style is
-  the one of this package. Other renderers put it elsewhere.
+- A footnote holds its whole block content. The backlink goes before
+  the close tag of the last paragraph, as `cmark-gfm` puts it.
+  `pulldown-cmark` emits no backlink. `goldmark` and Python-Markdown
+  put it elsewhere. The style of the link is the one of this package.
 
-- The `smart` option reads the quote marks of one text run. It treats a
-  quote after an opening marker as an opening quote.
+- The `smart` option reads the quote marks of one text run. It treats
+  a quote after an opening marker as an opening quote. This matches
+  pulldown-cmark `ENABLE_SMART_PUNCTUATION`. Python-Markdown with
+  `smarty` reads `'tis` as a closing quote. `markdown-it` and
+  `goldmark` leave the quotes alone by default.
+- A run of five dashes stays as it is here. pulldown-cmark and
+  `goldmark` turn it into dashes.
 
 - The email autolink checks the last domain label against a short
   list. The list holds the common endings and the country endings of
-  two letters. An ending outside the list gives no link. `cmark-gfm`
-  reads the whole TLD list.
+  two letters. An ending outside the list gives no link. The GFM spec
+  asks only for one dot and no trailing `-` or `_`, and `cmark-gfm`
+  follows it. `markdown-it` uses a TLD list like this package. So the
+  references disagree, and the list stays.
 
-- Heading attributes, definition lists, math blocks and YAML
-  metadata blocks stay out. So do admonitions, attribute lists,
-  wikilinks, `nl2br`, sane lists and the CJK line break options.
-  Each is an opt-in extension of one library, with no seat in the
-  CommonMark core.
+- Math blocks, YAML metadata blocks, admonitions, attribute lists,
+  wikilinks and sane lists stay out. Each sits in few libraries, and
+  they disagree on the form.
+- Heading attributes, definition lists and `nl2br` stay out. Three or
+  four references have each, and they agree on the form. The CJK line
+  break options sit in `goldmark` 1.8.7 and later.
 
 - The `mangle` option of `marked` stays out. It obscures email
-  addresses in the output. A caller that needs it can pre-process the
-  input.
+  addresses in the output, so no work on the input gives the same
+  result. `marked` removed the option in 8.0.0.
 
 ## Test
 
