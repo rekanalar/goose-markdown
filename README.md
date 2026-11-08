@@ -93,12 +93,6 @@ the reference libraries holds these limits:
   differ on rare forms such as `a@b.2`, `a@b_c.d` and `a@-b.c`. This
   package follows `cmark-gfm` on all three.
 
-- The `heading_attrs` option rejects a name that starts with `on`, so
-  no event handler gets through. The block stays plain text then.
-  `goldmark` and Python-Markdown let such names pass. It also rejects a
-  name with a quote or `>`. Other names, such as `style`, pass. A caller
-  that renders untrusted input should leave `heading_attrs` off.
-
 - A definition list holds one paragraph per definition. A colon line
   straight under the term, with no blank line, gives a tight `<dd>`, as
   `goldmark` and Python-Markdown do. A definition
@@ -114,6 +108,46 @@ the reference libraries holds these limits:
 - The `mangle` option of `marked` stays out. It obscures email
   addresses in the output, so no work on the input gives the same
   result. `marked` removed the option in 8.0.0.
+
+## Security
+
+The package takes text from people you do not know. Each protection
+below goes beyond what some reference libraries do. Each one has a test
+in `test/run.goose`.
+
+- `url_unsafe` blocks link and image targets that use the schemes
+  `javascript:`, `vbscript:`, `file:` and `data:`. The href then stays
+  empty. A `data:` image of type png, gif, jpeg or webp stays.
+
+  The check drops control bytes and spaces inside the scheme, so
+  `java&#9;script:` fails too. It also covers `<javascript:x>`.
+  `goldmark` blocks these targets, and `markdown-it` does too.
+  Python-Markdown writes `javascript:` links as they are. So does
+  `cmark`, unless `CMARK_OPT_SAFE` is set. This package blocks them
+  always, with no option to turn it off.
+- `heading_attrs` takes an attribute name of one form. The first byte
+  is a letter, `_` or `:`. The other bytes are letters, digits and `:`,
+  `.`, `_`, `-`. A name that starts with `on` is an event handler, so
+  it never passes. The block stays plain text then.
+
+  `goldmark` drops such names from a heading. Python-Markdown
+  `attr_list` writes `onmouseover` into the tag. Before this check, a
+  quote in a name broke out of the tag.
+- `escape_html` turns raw HTML into escaped text. The default writes it
+  as it is, as CommonMark asks. A caller that renders untrusted input
+  should set it.
+- Every text and attribute value goes through `escape_text`,
+  `escape_attr` or `escape_url`. The scans for emphasis, links, email
+  and quotes run in linear time. The tests time hostile input.
+
+Risks that stay:
+
+- With `escape_html` off, raw HTML runs script. Sanitize the output or
+  set the option.
+- The `heading_attrs` option still lets a caller set `style`, `id` and
+  `class` from the text. A page script may trust an `id`. Leave
+  `heading_attrs` off for untrusted input.
+- The filter checks the scheme only. It does not judge a host or a path.
 
 ## Test
 
