@@ -71,9 +71,11 @@ the reference libraries holds these limits:
   output itself.
 
 - A footnote holds its whole block content. The backlink goes before
-  the close tag of the last paragraph, as `cmark-gfm` puts it.
-  `pulldown-cmark` emits no backlink. `goldmark` and Python-Markdown
-  put it elsewhere. The style of the link is the one of this package.
+  the close tag of the last paragraph. With no paragraph in the body,
+  it goes after the last block. `cmark-gfm` and `goldmark` do the
+  same. Python-Markdown wraps it in a paragraph then.
+- `pulldown-cmark` gives no footnote backlink at all. The style of the
+  link is the one of this package.
 
 - The `smart` option reads the quote marks of one text run. It treats
   a quote after an opening marker as an opening quote. This matches
