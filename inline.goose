@@ -222,14 +222,51 @@ fn parse_dest(s: const u8[:], from: i64, memo: i64[3]&) -> i64, const u8[:], con
     return -1, s[0..0], s[0..0];
 }
 
+// mark_openers sets open[k - a] for each single quote in s[a..b] that a
+// later quote matches as an opener.
+// The rule follows cmark: every quote is a closing one, and a quote
+// becomes an opener only when a later quote can close it. The flanks
+// follow the delimiter rules: a quote opens when the byte after it is
+// text and (not punctuation, or the byte before is space or
+// punctuation), and it never opens from the right flank.
+fn mark_openers(s: const u8[:], a: i64, b: i64, after_open: bool, open: bool[>..]&) {
+    var idx: i64[>..] = [];
+    var k = a;
+    while k < b {
+        open.push(false);
+        if s[k] != '\'' { k += 1; continue; }
+        let before: u8 = if k == 0 || (after_open && k == a) { ' ' } else { s[k - 1] };
+        let after: u8 = if k + 1 >= b { ' ' } else { s[k + 1] };
+        let left = !is_space(after) && (!is_punct(after) || is_space(before) || is_punct(before));
+        let right = !is_space(before) && (!is_punct(before) || is_space(after) || is_punct(after));
+        let can_open = left && !right && before != ']' && before != ')';
+        let can_close = right;
+        if can_open {
+            idx.push(k);
+        } else if can_close && idx.len > 0 {
+            // The nearest unmatched opener becomes the opening quote.
+            open[idx[idx.len - 1] - a] = true;
+            idx.pop();
+        }
+        k += 1;
+    }
+}
+
 // emit_text writes s[a..b] as text. With the smart flag it turns
-// quotes, dashes and dots into typographic characters.
+// quotes, dashes and dots into typographic characters. The single
+// quote is a closing one unless a later quote matches it as an opener,
+// as cmark does. A run of hyphens gives em dashes in threes, with the
+// rest as en dashes: a count that divides by 3 gives only em dashes,
+// one that divides by 2 gives only en dashes, 3n+2 gives n em dashes
+// and one en dash, and 3n+1 gives n-1 em dashes and two en dashes.
 fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool, after_open: bool) {
     if b <= a { return; }
     if !smart {
         escape_text(out, s[a..b]);
         return;
     }
+    var open: bool[>..] = [];
+    mark_openers(s, a, b, after_open, open);
     var k = a;
     while k < b {
         let c = s[k];
@@ -243,7 +280,8 @@ fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool, after_o
             }
             k += 1;
         } else if c == '\'' {
-            if is_space(prev) || prev == '(' || prev == '[' || prev == '{' {
+            let f = k - a;
+            if f < open.len && open[f] {
                 out.append("‘");
             } else {
                 out.append("’");
@@ -259,9 +297,16 @@ fn emit_text(out: u8[>..]&, s: const u8[:], a: i64, b: i64, smart: bool, after_o
             } else if n % 2 == 0 {
                 var m: i64 = 0;
                 while m < n / 2 { out.append("–"); m += 1; }
+            } else if n % 3 == 2 {
+                var m: i64 = 0;
+                while m < (n - 2) / 3 { out.append("—"); m += 1; }
+                out.append("–");
+            } else if n == 1 {
+                out.push('-');
             } else {
                 var m: i64 = 0;
-                while m < n { out.push('-'); m += 1; }
+                while m < (n - 4) / 3 { out.append("—"); m += 1; }
+                out.append("––");
             }
             k = e;
         } else if c == '.' && k + 2 < b + 0 && s[k + 1] == '.' && s[k + 2] == '.' {
@@ -332,109 +377,92 @@ fn is_email_before(b: u8) -> bool {
     return is_alnum(b) || b == '@' || b == '.' || b == '-' || b == '_' || b == '+';
 }
 
-// is_email_mark holds for the marks an email local part may not end with.
+// is_email_mark holds for the marks an email local part may hold.
 fn is_email_mark(c: u8) -> bool {
     return c == '.' || c == '-' || c == '_' || c == '+';
 }
 
-// known_ending holds when the last domain label is a plausible ending.
-// A label of two letters is a country ending. The list holds the
-// common endings that GFM names.
-fn known_ending(w: const u8[:]) -> bool {
-    if w.len == 2 && ((w[0] >= 'a' && w[0] <= 'z') || (w[0] >= 'A' && w[0] <= 'Z'))
-       && ((w[1] >= 'a' && w[1] <= 'z') || (w[1] >= 'A' && w[1] <= 'Z')) {
-        return true;
-    }
-    let list: const u8[:] = "com org net edu gov mil int co io ai info biz app dev xyz me";
-    var start: i64 = 0;
-    var k: i64 = 0;
-    while k < list.len {
-        if list[k] == ' ' {
-            if k - start == w.len {
-                var hit = true;
-                var m: i64 = 0;
-                while m < w.len {
-                    var a = w[m];
-                    if a >= 'A' && a <= 'Z' { a += 32; }
-                    if a != list[start + m] { hit = false; break; }
-                    m += 1;
-                }
-                if hit { return true; }
+// email_end gives the start and the end of the bare email address that
+// starts at i, or i, i when none starts there. The rules follow the
+// GFM spec and cmark-gfm: the read goes back from the @ over alnum and
+// the four marks, the domain holds labels of alnum, - and _ split by
+// periods, at least one period, and the last byte is a letter or a
+// digit. A second @ restarts the try after the first one.
+fn email_end(s: const u8[:], i: i64) -> i64, i64 {
+    var start = i;
+    loop {
+        // The before-check runs once, at the first try. A restart sits
+        // behind a first @, which cmark-gfm reads over.
+        if start == i && start > 0 && is_email_before(s[start - 1]) { return i, i; }
+        var at: i64 = -1;
+        var e = start;
+        var again = false;
+        while e < s.len {
+            let c = s[e];
+            if c == ' ' || c == '\t' || c == '\n' || c == '<' || c == '>' { break; }
+            if c == '@' {
+                if at >= 0 { start = at + 1; again = true; break; }
+                at = e;
+            } else if !is_stem_byte(c) {
+                // Any other byte ends the stem. The address may still
+                // sit before it.
+                break;
             }
-            start = k + 1;
+            e += 1;
         }
-        k += 1;
-    }
-    return false;
-}
-
-// email_end gives the end of the bare email address that starts at i,
-// or i when none starts there. The rules follow the GFM spec: the stem
-// holds one @, the local part carries no mark at its ends, the domain
-// holds two labels or more, and the last label has a known ending.
-fn email_end(s: const u8[:], i: i64) -> i64 {
-    if i > 0 && is_email_before(s[i - 1]) { return i; }
-    var at: i64 = -1;
-    var e = i;
-    while e < s.len {
-        let c = s[e];
-        if c == ' ' || c == '\t' || c == '\n' || c == '<' || c == '>' { break; }
-        if c == '@' {
-            if at >= 0 { return i; }
-            at = e;
-        } else if !is_stem_byte(c) {
-            // Any other byte ends the stem. The address may still sit
-            // before it.
+        if again { continue; }
+        if at < 0 || at == start || at + 1 >= e { return i, i; }
+        // The byte after the @ starts the domain, so it may not hold a
+        // mark. The byte before the @ may hold one.
+        if is_email_mark(s[at + 1]) { return i, i; }
+        // The trailing punctuation comes off the end. A run of ) comes
+        // off while its parens hold no open one.
+        var end = e;
+        var open: i64 = 0;
+        var close: i64 = 0;
+        var m = start;
+        while m < end {
+            if s[m] == '(' { open += 1; }
+            if s[m] == ')' { close += 1; }
+            m += 1;
+        }
+        while end > at + 2 {
+            let c = s[end - 1];
+            if c == '?' || c == '!' || c == '.' || c == ',' || c == ':' || c == ';'
+               || c == '*' || c == '_' || c == '~' || c == '\'' || c == '"' {
+                end -= 1;
+                continue;
+            }
+            if c == ')' && close > open {
+                close -= 1;
+                end -= 1;
+                continue;
+            }
             break;
         }
-        e += 1;
-    }
-    if at < 0 || at == i || at + 1 >= e { return i; }
-    if is_email_mark(s[at - 1]) || is_email_mark(s[at + 1]) { return i; }
-    // The trailing punctuation comes off the end. A run of ) comes off
-    // while its parens hold no open one.
-    var end = e;
-    var open: i64 = 0;
-    var close: i64 = 0;
-    var m = i;
-    while m < end {
-        if s[m] == '(' { open += 1; }
-        if s[m] == ')' { close += 1; }
-        m += 1;
-    }
-    while end > at + 2 {
-        let c = s[end - 1];
-        if c == '?' || c == '!' || c == '.' || c == ',' || c == ':' || c == ';'
-           || c == '*' || c == '_' || c == '~' {
-            end -= 1;
-            continue;
+        // The domain: labels of alnum, - and _, joined by dots.
+        var label_start = at + 1;
+        var labels: i64 = 0;
+        var k = at + 1;
+        var bad = false;
+        while k < end {
+            let c = s[k];
+            if c == '.' {
+                if k == label_start || s[k - 1] == '-' || s[k - 1] == '_' { bad = true; break; }
+                labels += 1;
+                label_start = k + 1;
+            } else if !is_alnum(c) && c != '-' && c != '_' {
+                bad = true;
+                break;
+            }
+            k += 1;
         }
-        if c == ')' && close > open {
-            close -= 1;
-            end -= 1;
-            continue;
-        }
-        break;
+        if bad || labels < 1 || label_start == end { return i, i; }
+        // The last byte of the domain is a letter or a digit.
+        let last = s[end - 1];
+        if !is_alnum(last) { return i, i; }
+        return start, end;
     }
-    // The domain: labels of alnum and -, joined by dots.
-    var label_start = at + 1;
-    var labels: i64 = 0;
-    var k = at + 1;
-    while k < end {
-        let c = s[k];
-        if c == '.' {
-            if k == label_start || k - label_start > 63 || s[k - 1] == '-' { return i; }
-            labels += 1;
-            label_start = k + 1;
-        } else if !is_alnum(c) && c != '-' {
-            return i;
-        }
-        k += 1;
-    }
-    if labels < 1 || label_start == end || end - label_start > 63 { return i; }
-    if s[end - 1] == '-' || end - label_start < 2 { return i; }
-    if !known_ending(s[label_start..end]) { return i; }
-    return end;
 }
 
 // bare_end gives the end of a bare address that starts at i, or i when
@@ -639,7 +667,7 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
             while i - ws > ts && s[i - ws - 1] == ' ' { ws += 1; }
             push_text(toks, ts, i - ws);
             let p0 = pre.len;
-            if ws >= 2 { pre.append("<br />\n"); } else { pre.append("\n"); }
+            if ws >= 2 || o.nl2br { pre.append("<br />\n"); } else { pre.append("\n"); }
             let q0 = plain.len;
             plain.push('\n');
             push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
@@ -908,16 +936,17 @@ fn render_inline(out: u8[>..]&, s: const u8[:], o: Options, st: State&) {
         } else if o.autolinks && is_stem_byte(c)
                   && (i == 0 || !is_email_before(s[i - 1])) {
             // A bare email address. The check reads one stem, so the
-            // time stays linear in the text.
-            let e = email_end(s, i);
-            if e > i {
-                push_text(toks, ts, i);
+            // time stays linear in the text. A second @ restarts the
+            // try after the first one, so the match may start later.
+            let bs, e = email_end(s, i);
+            if e > bs {
+                push_text(toks, ts, bs);
                 let p0 = pre.len;
-                emit_open(pre, str("mailto:", s[i..e]), "");
-                escape_text(pre, s[i..e]);
+                emit_open(pre, str("mailto:", s[bs..e]), "");
+                escape_text(pre, s[bs..e]);
                 pre.append("</a>");
                 let q0 = plain.len;
-                plain.append(s[i..e]);
+                plain.append(s[bs..e]);
                 push_raw(toks, K_RAW, p0, pre.len, q0, plain.len);
                 i = e;
                 ts = i;

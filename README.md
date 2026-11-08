@@ -36,7 +36,7 @@ import markdown from "rekanalar/goose-markdown@v1.0.1";
 | `render(out, s)` | writes the HTML of the text into the buffer of the caller, with every extension off; always returns true |
 | `render_with(out, s, options)` | the same, with the extensions that `options` switches on |
 
-`Options` holds eight flags. Each is false by default.
+`Options` holds eleven flags. Each is false by default.
 
 | Flag | Extension | Same as |
 |---|---|---|
@@ -48,6 +48,9 @@ import markdown from "rekanalar/goose-markdown@v1.0.1";
 | `footnotes` | `[^label]` and `[^label]: text` | `ENABLE_FOOTNOTES` |
 | `smart` | curly quotes, `--` as en dash, `---` as em dash, `...` as an ellipsis | `ENABLE_SMART_PUNCTUATION` |
 | `escape_html` | escape the raw HTML of the input instead of writing it out | `markdown-it` with `html: false` escapes it too. cmark `CMARK_OPT_SAFE` and `goldmark` omit the HTML instead. |
+| `heading_attrs` | `# Title {#id .class key=value}` sets `id`, `class` and other attributes; the `id` replaces the `anchors` id | goldmark `parser.WithAttribute`, pulldown-cmark `ENABLE_HEADING_ATTRIBUTES`, Python-Markdown `attr_list` |
+| `def_lists` | a term line, then lines that start with `: `, give `<dl>`, `<dt>` and `<dd>`; each `: ` line gives one `<dd>` | goldmark `extension.DefinitionList`, pulldown-cmark `ENABLE_DEFINITION_LIST`, Python-Markdown `def_list` |
+| `nl2br` | one newline inside a paragraph gives `<br />` | goldmark `html.WithHardWraps`, marked `breaks`, Python-Markdown `nl2br`, markdown-it `breaks` |
 
 ```goose
 var out: u8[>..] = [];
@@ -77,27 +80,36 @@ the reference libraries holds these limits:
 - `pulldown-cmark` gives no footnote backlink at all. The style of the
   link is the one of this package.
 
-- The `smart` option reads the quote marks of one text run. It treats
-  a quote after an opening marker as an opening quote. This matches
-  pulldown-cmark `ENABLE_SMART_PUNCTUATION`. Python-Markdown with
-  `smarty` reads `'tis` as a closing quote. `markdown-it` and
-  `goldmark` leave the quotes alone by default.
-- A run of five dashes stays as it is here. pulldown-cmark and
-  `goldmark` turn it into dashes.
+- The `smart` option follows the rule of `cmark`. A single quote is a
+  closing quote unless a later quote closes it, so `'tis` gives `’tis`.
+  A run of hyphens follows the rule that `cmark-gfm`, `pulldown-cmark`
+  and `goldmark` share for 2, 3, 5 and 6 hyphens. Four hyphens differ:
+  `pulldown-cmark` and `cmark-gfm` give two en dashes, and `goldmark`
+  gives an em dash and a hyphen. This package gives two en dashes.
 
-- The email autolink checks the last domain label against a short
-  list. The list holds the common endings and the country endings of
-  two letters. An ending outside the list gives no link. The GFM spec
-  asks only for one dot and no trailing `-` or `_`, and `cmark-gfm`
-  follows it. `markdown-it` uses a TLD list like this package. So the
-  references disagree, and the list stays.
+- The email autolink follows the GFM rule, with no list of endings.
+  `markdown-it` uses a list of top-level domains instead. The GFM spec
+  decides the rule, so the package follows `cmark-gfm`. The references
+  differ on rare forms such as `a@b.2`, `a@b_c.d` and `a@-b.c`. This
+  package follows `cmark-gfm` on all three.
+
+- The `heading_attrs` option rejects a name that starts with `on`, so
+  no event handler gets through. The block stays plain text then.
+  `goldmark` and Python-Markdown let such names pass. It also rejects a
+  name with a quote or `>`. Other names, such as `style`, pass. A caller
+  that renders untrusted input should leave `heading_attrs` off.
+
+- A definition list holds one paragraph per definition. A colon line
+  straight under the term, with no blank line, gives a tight `<dd>`, as
+  `goldmark` and Python-Markdown do. A definition
+  with several blocks, or with a nested list, stays a plain paragraph.
+  Python-Markdown and `goldmark` read such blocks.
 
 - Math blocks, YAML metadata blocks, admonitions, attribute lists,
   wikilinks and sane lists stay out. Each sits in few libraries, and
   they disagree on the form.
-- Heading attributes, definition lists and `nl2br` stay out. Three or
-  four references have each, and they agree on the form. The CJK line
-  break options sit in `goldmark` 1.8.7 and later.
+- The CJK line break options sit in `goldmark` 1.8.7 and later and stay
+  out.
 
 - The `mangle` option of `marked` stays out. It obscures email
   addresses in the output, so no work on the input gives the same
@@ -110,6 +122,7 @@ goose run test/run.goose
 goose run test/spec.goose
 goose run examples/render.goose
 goose run examples/extensions.goose
+goose run examples/options.goose
 goose run examples/html.goose
 ```
 

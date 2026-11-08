@@ -23,6 +23,13 @@ struct Options {
     smart: bool,
     // Escape the raw HTML of the input instead of writing it out.
     escape_html: bool,
+    // Read {#id .class} attribute blocks at the end of a heading line.
+    heading_attrs: bool,
+    // Read a term paragraph and the : lines after it as a definition
+    // list.
+    def_lists: bool,
+    // Turn one newline inside a paragraph into a <br />.
+    nl2br: bool,
 }
 
 // Def holds a link reference definition or a footnote definition. The

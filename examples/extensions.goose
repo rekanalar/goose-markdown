@@ -6,7 +6,7 @@ import markdown from "..";
 
 fn main() {
     let text = "# Plan\n\n- [x] ~~old~~ done\n- [ ] see www.example.org\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\nA note[^n]. \"Quoted\" -- smart.\n\n[^n]: The note.";
-    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true };
+    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true, heading_attrs: false, def_lists: false, nl2br: false };
     var out: u8[>..] = [];
     markdown::render_with(out, text, o);
     print(out);

@@ -316,6 +316,80 @@ fn render_table(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>
     out.append("</table>\n");
 }
 
+// attr_name_ok holds for an attribute name of the form letter, `_` or
+// `:` first, then letters, digits and `:`, `.`, `_`, `-`. The rule is
+// the one of goldmark. It keeps a quote or `>` out of the open tag. A
+// name that starts with "on" is an event handler, so it never passes.
+fn attr_name_ok(n: const u8[:]) -> bool {
+    if n.len == 0 { return false; }
+    if n.len >= 2 && (n[0] == 'o' || n[0] == 'O') && (n[1] == 'n' || n[1] == 'N') { return false; }
+    var i: i64 = 0;
+    while i < n.len {
+        let c = n[i];
+        let first = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':';
+        if !(first || (i > 0 && (is_alnum(c) || c == '.' || c == '-'))) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// head_attrs reads a trailing {#id .class name=value} block off a heading
+// text. It gives the end of the text before the block and fills the id,
+// the classes (space joined) and the other attributes (ready to write).
+// It gives -1 when no valid block ends the text.
+fn head_attrs(t: const u8[:], id: u8[>..]&, cls: u8[>..]&, extra: u8[>..]&) -> i64 {
+    var e = t.len;
+    while e > 0 && t[e - 1] == ' ' { e -= 1; }
+    if e == 0 || t[e - 1] != '}' { return -1; }
+    var o = e - 1;
+    while o >= 0 && t[o] != '{' { o -= 1; }
+    if o < 0 || (o > 0 && t[o - 1] != ' ') { return -1; }
+    let inner = t[o + 1..e - 1];
+    var k: i64 = 0;
+    var got = false;
+    while k < inner.len {
+        if inner[k] == ' ' { k += 1; continue; }
+        var j = k;
+        while j < inner.len && inner[j] != ' ' && inner[j] != '=' { j += 1; }
+        if j < inner.len && inner[j] == '=' {
+            let name = inner[k..j];
+            if !attr_name_ok(name) { return -1; }
+            var v = j + 1;
+            var ve = v;
+            var next_k: i64;
+            if v < inner.len && inner[v] == '"' {
+                v += 1;
+                ve = v;
+                while ve < inner.len && inner[ve] != '"' { ve += 1; }
+                if ve >= inner.len { return -1; }
+                next_k = ve + 1;
+            } else {
+                while ve < inner.len && inner[ve] != ' ' { ve += 1; }
+                next_k = ve;
+            }
+            extra.append(" ");
+            extra.append(name);
+            extra.append("=\"");
+            escape_attr(extra, inner[v..ve]);
+            extra.append("\"");
+            k = next_k;
+        } else if inner[k] == '#' && j > k + 1 {
+            id.clear();
+            escape_attr(id, inner[k + 1..j]);
+            k = j;
+        } else if inner[k] == '.' && j > k + 1 {
+            if cls.len > 0 { cls.append(" "); }
+            escape_attr(cls, inner[k + 1..j]);
+            k = j;
+        } else { return -1; }
+        got = true;
+    }
+    if !got { return -1; }
+    var te = o;
+    while te > 0 && t[te - 1] == ' ' { te -= 1; }
+    return te;
+}
+
 // render_leaf writes one leaf block.
 fn render_leaf(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&, b: i64) {
     let k = bl[b].kind;
@@ -338,13 +412,31 @@ fn render_leaf(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>.
         out.push(('0' + bl[b].level) as u8);
         var t: u8[>..] = [];
         leaf_join(t, lines, bl, ln, b);
-        if o.anchors {
+        var id: u8[>..] = [];
+        var cls: u8[>..] = [];
+        var extra: u8[>..] = [];
+        var te = t.len;
+        if o.heading_attrs {
+            let r = head_attrs(t[..], id, cls, extra);
+            if r >= 0 { te = r; }
+        }
+        if id.len > 0 {
             out.append(" id=\"");
-            make_id(out, t[..], ids);
+            out.append(id[..]);
+            out.append("\"");
+        } else if o.anchors {
+            out.append(" id=\"");
+            make_id(out, t[..te], ids);
             out.append("\"");
         }
+        if cls.len > 0 {
+            out.append(" class=\"");
+            out.append(cls[..]);
+            out.append("\"");
+        }
+        out.append(extra[..]);
         out.append(">");
-        render_inline(out, t[..], o, st);
+        render_inline(out, t[..te], o, st);
         out.append("</h");
         out.push(('0' + bl[b].level) as u8);
         out.append(">\n");
@@ -431,6 +523,92 @@ fn exit_block(out: u8[>..]&, bl: Blk[>..]&, b: i64) {
     }
 }
 
+// def_line holds when piece k of the paragraph c starts with a colon and
+// a space.
+fn def_line(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64, k: i64) -> bool {
+    let p = ln[bl[c].lfirst + k];
+    let e = piece_end(lines, p);
+    return e - p.from >= 2 && lines[p.line][p.from] == ':' && lines[p.line][p.from + 1] == ' ';
+}
+
+// is_def_para holds for a paragraph whose first line is a definition.
+fn is_def_para(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64) -> bool {
+    if c < 0 || bl[c].kind != B_PARA || bl[c].lcount == 0 { return false; }
+    return def_line(lines, bl, ln, c, 0);
+}
+
+// is_term_def holds for a paragraph whose second line is a definition.
+// The first line is the term, and no blank line sits between them.
+fn is_term_def(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64) -> bool {
+    if c < 0 || bl[c].kind != B_PARA || bl[c].lcount < 2 { return false; }
+    return !def_line(lines, bl, ln, c, 0) && def_line(lines, bl, ln, c, 1);
+}
+
+// emit_dds writes one dd for each definition line of the paragraph c,
+// from piece first on. A line without the colon continues the dd above.
+// A tight dd writes the text with no paragraph, as goldmark and
+// Python-Markdown do when no blank line sits before the colon.
+fn emit_dds(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, o: Options, st: State&, c: i64, first: i64, tight: bool) {
+    var k = first;
+    while k < bl[c].lcount {
+        var t: u8[>..] = [];
+        var j = k;
+        while j < bl[c].lcount && (j == k || !def_line(lines, bl, ln, c, j)) {
+            let p = ln[bl[c].lfirst + j];
+            var from = p.from;
+            if j == k {
+                from += 1;
+                let e0 = piece_end(lines, p);
+                while from < e0 && lines[p.line][from] == ' ' { from += 1; }
+            } else {
+                t.push('\n');
+            }
+            t.append(lines[p.line][from..piece_end(lines, p)]);
+            j += 1;
+        }
+        if tight {
+            out.append("<dd>");
+            render_inline(out, t[..], o, st);
+            out.append("</dd>\n");
+        } else {
+            out.append("<dd>\n<p>");
+            render_inline(out, t[..], o, st);
+            out.append("</p>\n</dd>\n");
+        }
+        k = j;
+    }
+}
+
+// render_deflist writes the definition list that starts at the term c.
+// It gives the next block after the list.
+fn render_deflist(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, o: Options, st: State&, c: i64) -> i64 {
+    cr(out);
+    out.append("<dl>\n");
+    var term = c;
+    while term >= 0 && (is_term_def(lines, bl, ln, term)
+          || (bl[term].kind == B_PARA && !is_def_para(lines, bl, ln, term)
+              && is_def_para(lines, bl, ln, bl[term].next))) {
+        out.append("<dt>");
+        var t: u8[>..] = [];
+        var d = bl[term].next;
+        if is_term_def(lines, bl, ln, term) {
+            t.append(lines[ln[bl[term].lfirst].line][ln[bl[term].lfirst].from..piece_end(lines, ln[bl[term].lfirst])]);
+        } else {
+            leaf_join(t, lines, bl, ln, term);
+        }
+        render_inline(out, t[..], o, st);
+        out.append("</dt>\n");
+        if is_term_def(lines, bl, ln, term) { emit_dds(out, lines, bl, ln, o, st, term, 1, true); }
+        while is_def_para(lines, bl, ln, d) {
+            emit_dds(out, lines, bl, ln, o, st, d, 0, false);
+            d = bl[d].next;
+        }
+        term = d;
+    }
+    out.append("</dl>\n");
+    return term;
+}
+
 // walk renders the children of the block root. The root itself writes
 // no tags, so the document and a footnote body share the same walk.
 fn walk(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&, root: i64) {
@@ -457,6 +635,9 @@ fn walk(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, id
             // A footnote definition stays out of the flow.
         } else if k == B_VOID || k == B_DOC {
             // Nothing to write.
+        } else if o.def_lists && k == B_PARA && !is_def_para(lines, bl, ln, c)
+                  && (is_term_def(lines, bl, ln, c) || is_def_para(lines, bl, ln, bl[c].next)) {
+            curs[top] = render_deflist(out, lines, bl, ln, o, st, c);
         } else {
             // A task list marker goes before the first paragraph of an
             // item. The piece drops its first four bytes.

@@ -258,14 +258,23 @@ fn test_autolinks() {
     // Two labels with a country ending work.
     expect_with("no-reply@example.co.uk", o, "<p><a href=\"mailto:no-reply@example.co.uk\">no-reply@example.co.uk</a></p>\n");
     // Two marks give no link.
-    expect_with("e@x@y.com here", o, "<p>e@x@y.com here</p>\n");
-    // An unknown ending gives no link.
-    expect_with("foo@bar.company ok", o, "<p>foo@bar.company ok</p>\n");
+    expect_with("e@x@y.com here", o, "<p>e@<a href=\"mailto:x@y.com\">x@y.com</a> here</p>\n");
+    // No list of endings: any last label links (GFM rule).
+    expect_with("foo@bar.company ok", o, "<p><a href=\"mailto:foo@bar.company\">foo@bar.company</a> ok</p>\n");
+    expect_with("a@b.c", o, "<p><a href=\"mailto:a@b.c\">a@b.c</a></p>\n");
+    expect_with("a@b.zzzz", o, "<p><a href=\"mailto:a@b.zzzz\">a@b.zzzz</a></p>\n");
+    // Marks at the ends of the local part stay in the link.
+    expect_with("a.@b.com", o, "<p><a href=\"mailto:a.@b.com\">a.@b.com</a></p>\n");
+    expect_with("-a@b.com", o, "<p><a href=\"mailto:-a@b.com\">-a@b.com</a></p>\n");
+    expect_with("._@b.com", o, "<p><a href=\"mailto:._@b.com\">._@b.com</a></p>\n");
+    // A domain with no period, or a last byte of - or _, gives no link.
+    expect_with("a@b.z-", o, "<p>a@b.z-</p>\n");
+    expect_with("a@b_", o, "<p>a@b_</p>\n");
+    expect_with("a@b.", o, "<p>a@b.</p>\n");
     // Marks of the local part may sit inside, not at the ends.
     expect_with("stem a.b+c@mail.example.com end", o, "<p>stem <a href=\"mailto:a.b+c@mail.example.com\">a.b+c@mail.example.com</a> end</p>\n");
     // An address inside a longer word does not link.
-    expect_with("dot a@b.example.com.another longer", o, "<p>dot a@b.example.com.another longer</p>\n");
-    expect_with("at mark x@y.example.com.z no", o, "<p>at mark x@y.example.com.z no</p>\n");
+    expect_with("dot a@b.example.com.another longer", o, "<p>dot <a href=\"mailto:a@b.example.com.another\">a@b.example.com.another</a> longer</p>\n");
     // The comma after the address stays outside.
     expect_with("trailing foo@bar.com, ok", o, "<p>trailing <a href=\"mailto:foo@bar.com\">foo@bar.com</a>, ok</p>\n");
 }
@@ -300,8 +309,57 @@ fn test_smart() {
     expect_with("`\"a\" -- b`", o, "<p><code>&quot;a&quot; -- b</code></p>\n");
 }
 
+fn test_heading_attrs() {
+    let o = markdown::Options { heading_attrs: true, .. };
+    expect_with("# Title {#myid .cls}", o, "<h1 id=\"myid\" class=\"cls\">Title</h1>\n");
+    expect_with("## A {.a .b}", o, "<h2 class=\"a b\">A</h2>\n");
+    expect_with("# T {data-x=\"1 2\" k=v}", o, "<h1 data-x=\"1 2\" k=\"v\">T</h1>\n");
+    expect_with("# T {not valid}", o, "<h1>T {not valid}</h1>\n");
+    expect_with("# T {x\"><b>=1}", o, "<h1>T {x&quot;&gt;<b>=1}</h1>\n");
+    expect_with("# T {onmouseover=alert(1)}", o, "<h1>T {onmouseover=alert(1)}</h1>\n");
+    expect_with("# T {OnClick=x}", o, "<h1>T {OnClick=x}</h1>\n");
+    expect_with("# T{#a}", o, "<h1>T{#a}</h1>\n");
+    expect_render("# Title {#myid .cls}", "<h1>Title {#myid .cls}</h1>\n");
+    let oa = markdown::Options { anchors: true, heading_attrs: true, .. };
+    expect_with("# Title {#mine}\n# Other", oa, "<h1 id=\"mine\">Title</h1>\n<h1 id=\"other\">Other</h1>\n");
+}
+
+fn test_def_lists() {
+    let o = markdown::Options { def_lists: true, .. };
+    expect_with("Term\n\n: Definition", o, "<dl>\n<dt>Term</dt>\n<dd>\n<p>Definition</p>\n</dd>\n</dl>\n");
+    expect_with("Term\n\n: One\n\n: Two", o, "<dl>\n<dt>Term</dt>\n<dd>\n<p>One</p>\n</dd>\n<dd>\n<p>Two</p>\n</dd>\n</dl>\n");
+    expect_with("A\n\n: a\n\nB\n\n: b", o, "<dl>\n<dt>A</dt>\n<dd>\n<p>a</p>\n</dd>\n<dt>B</dt>\n<dd>\n<p>b</p>\n</dd>\n</dl>\n");
+    expect_with("Term\n\n: One\n: Two", o, "<dl>\n<dt>Term</dt>\n<dd>\n<p>One</p>\n</dd>\n<dd>\n<p>Two</p>\n</dd>\n</dl>\n");
+    expect_with("Term\n\n: One\n  more", o, "<dl>\n<dt>Term</dt>\n<dd>\n<p>One\nmore</p>\n</dd>\n</dl>\n");
+    expect_with("Term\n: Tight", o, "<dl>\n<dt>Term</dt>\n<dd>Tight</dd>\n</dl>\n");
+    expect_with(": lone\n\ntext", o, "<p>: lone</p>\n<p>text</p>\n");
+    expect_render("Term\n\n: Definition", "<p>Term</p>\n<p>: Definition</p>\n");
+}
+
+fn test_nl2br() {
+    let o = markdown::Options { nl2br: true, .. };
+    expect_with("a\nb", o, "<p>a<br />\nb</p>\n");
+    expect_with("a\n\nb", o, "<p>a</p>\n<p>b</p>\n");
+    expect_with("a\nb\nc", o, "<p>a<br />\nb<br />\nc</p>\n");
+    expect_render("a\nb", "<p>a\nb</p>\n");
+}
+
+fn test_smart_quotes_dashes() {
+    let o = markdown::Options { smart: true, .. };
+    expect_with("'tis", o, "<p>’tis</p>\n");
+    expect_with("it's", o, "<p>it’s</p>\n");
+    expect_with("a 'q' b", o, "<p>a ‘q’ b</p>\n");
+    expect_with("x ----- y", o, "<p>x —– y</p>\n");
+    expect_with("x ------ y", o, "<p>x —— y</p>\n");
+    expect_with("x ------- y", o, "<p>x —–– y</p>\n");
+    let ot = markdown::Options { tables: true, smart: true, .. };
+    expect_with("| a | b |\n|---|---|\n| 1 | 2 |", ot, "<table>\n<thead>\n<tr>\n<th>a</th>\n<th>b</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>1</td>\n<td>2</td>\n</tr>\n</tbody>\n</table>\n");
+    expect_with("x ' y", o, "<p>x ’ y</p>\n");
+    expect_with("x -- y --- z ---- w", o, "<p>x – y — z –– w</p>\n");
+}
+
 fn test_all_on() {
-    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true };
+    let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true, heading_attrs: true, def_lists: true, nl2br: true };
     var out: u8[>..] = [];
     assert(markdown::render_with(out, "# T\n\n~~a~~ www.x.org[^1]\n\n[^1]: n", o));
     assert(out.len > 0);
@@ -545,6 +603,10 @@ fn main() {
     test_tasklists();
     test_autolinks();
     test_tables();
+    test_heading_attrs();
+    test_def_lists();
+    test_nl2br();
+    test_smart_quotes_dashes();
     test_footnotes();
     test_smart();
     test_all_on();
