@@ -358,6 +358,19 @@ fn test_smart_quotes_dashes() {
     expect_with("x -- y --- z ---- w", o, "<p>x – y — z –– w</p>\n");
 }
 
+fn test_unsafe_urls() {
+    let o = markdown::Options { escape_html: true, .. };
+    expect_with("[x](javascript:alert(1))", o, "<p><a href=\"\">x</a></p>\n");
+    expect_with("[x](JaVaScRiPt:alert(1))", o, "<p><a href=\"\">x</a></p>\n");
+    expect_with("[x](java&#9;script:alert(1))", o, "<p><a href=\"\">x</a></p>\n");
+    expect_with("[x](vbscript:x) [y](file:///etc/passwd)", o, "<p><a href=\"\">x</a> <a href=\"\">y</a></p>\n");
+    expect_with("<javascript:alert(1)>", o, "<p><a href=\"\">javascript:alert(1)</a></p>\n");
+    expect_with("[x](data:text/html,hi)", o, "<p><a href=\"\">x</a></p>\n");
+    expect_with("![x](data:text/html,hi)", o, "<p><img src=\"\" alt=\"x\" /></p>\n");
+    expect_with("![x](data:image/png;base64,AA)", o, "<p><img src=\"data:image/png;base64,AA\" alt=\"x\" /></p>\n");
+    expect_with("[x](https://a.b/javascript:x) [y](/a:b) [z](a/b)", o, "<p><a href=\"https://a.b/javascript:x\">x</a> <a href=\"/a:b\">y</a> <a href=\"a/b\">z</a></p>\n");
+}
+
 fn test_all_on() {
     let o = markdown::Options { anchors: true, strikethrough: true, tasklists: true, autolinks: true, tables: true, footnotes: true, smart: true, escape_html: true, heading_attrs: true, def_lists: true, nl2br: true };
     var out: u8[>..] = [];
@@ -604,6 +617,7 @@ fn main() {
     test_autolinks();
     test_tables();
     test_heading_attrs();
+    test_unsafe_urls();
     test_def_lists();
     test_nl2br();
     test_smart_quotes_dashes();
