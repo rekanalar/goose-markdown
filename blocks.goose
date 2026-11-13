@@ -13,6 +13,9 @@ import escape;
 import types;
 import inline;
 import blocktree;
+import table_render;
+import heading_attrs;
+import deflist;
 
 // split_lines gives the lines of the text as spans. A Windows line end
 // gives the same line as a Unix one. The spans point into the input.
@@ -145,64 +148,8 @@ fn make_id(out: u8[>..]&, text: const u8[:], ids: u8[>..]&) {
     out.append(full[..]);
 }
 
-// split_cells cuts a table row into trimmed cells at each pipe that a
-// backslash does not escape. The pipe at each end does not count.
-fn split_cells(cells: const u8[:][>..]&, row: const u8[:]) {
-    var r = trim(row);
-    if r.len > 0 && r[0] == '|' { r = r[1..]; }
-    if r.len > 0 && r[r.len - 1] == '|' && !(r.len > 1 && r[r.len - 2] == '\\') { r = r[..r.len - 1]; }
-    var start: i64 = 0;
-    var i: i64 = 0;
-    while i < r.len {
-        if r[i] == '\\' { i += 2; continue; }
-        if r[i] == '|' {
-            cells.push(trim(r[start..i]));
-            start = i + 1;
-        }
-        i += 1;
-    }
-    if start <= r.len { cells.push(trim(r[start..r.len])); }
-}
 
-// is_delim_row holds when the line is a table delimiter row: cells of
-// dashes with optional colons.
-fn is_delim_row(line: const u8[:]) -> bool {
-    var cells: const u8[:][>..] = [];
-    split_cells(cells, line);
-    if cells.len == 0 { return false; }
-    var any_pipe = false;
-    for c in line { if c == '|' { any_pipe = true; } }
-    if !any_pipe && cells.len < 2 { return false; }
-    for cell in cells {
-        var t = cell;
-        if t.len > 0 && t[0] == ':' { t = t[1..]; }
-        if t.len > 0 && t[t.len - 1] == ':' { t = t[..t.len - 1]; }
-        if t.len == 0 { return false; }
-        for ch in t { if ch != '-' { return false; } }
-    }
-    return true;
-}
 
-// emit_row writes one table row. The align cells hold l, c, r or 0.
-fn emit_row(out: u8[>..]&, cells: const u8[:][>..]&, aligns: u8[>..]&, tag: const u8[:], o: Options, st: State&) {
-    out.append("<tr>\n");
-    var i: i64 = 0;
-    var count = aligns.len;
-    while i < count {
-        out.append("<");
-        out.append(tag);
-        if aligns[i] == 'l' { out.append(" align=\"left\""); }
-        else if aligns[i] == 'c' { out.append(" align=\"center\""); }
-        else if aligns[i] == 'r' { out.append(" align=\"right\""); }
-        out.append(">");
-        if i < cells.len { render_inline(out, cells[i], o, st); }
-        out.append("</");
-        out.append(tag);
-        out.append(">\n");
-        i += 1;
-    }
-    out.append("</tr>\n");
-}
 
 // ---- the renderer over the block tree ----
 
@@ -268,127 +215,8 @@ fn code_body(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]
     }
 }
 
-// render_table writes the table of the block. The first piece holds the
-// header row, the second the delimiter row, the rest the body rows.
-fn render_table(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, b: i64, o: Options, st: State&) {
-    cr(out);
-    out.append("<table>\n<thead>\n");
-    var aligns: u8[>..] = [];
-    var drow: u8[>..] = [];
-    let dp = ln[bl[b].lfirst + 1];
-    let de = piece_end(lines, dp);
-    var s: i64 = 0;
-    while s < dp.padn { drow.push(' '); s += 1; }
-    drow.append(lines[dp.line][dp.from..de]);
-    var dcells: const u8[:][>..] = [];
-    split_cells(dcells, drow[..]);
-    for d in dcells {
-        let left = d[0] == ':';
-        let right = d[d.len - 1] == ':';
-        if left && right { aligns.push('c'); }
-        else if left { aligns.push('l'); }
-        else if right { aligns.push('r'); }
-        else { aligns.push('0'); }
-    }
-    var row: u8[>..] = [];
-    var cells: const u8[:][>..] = [];
-    let hp = ln[bl[b].lfirst];
-    let he = piece_end(lines, hp);
-    row.append(lines[hp.line][hp.from..he]);
-    split_cells(cells, row[..]);
-    emit_row(out, cells, aligns, "th", o, st);
-    out.append("</thead>\n");
-    if bl[b].lcount > 2 {
-        out.append("<tbody>\n");
-        var k: i64 = 2;
-        while k < bl[b].lcount {
-            var row2: u8[>..] = [];
-            var cells2: const u8[:][>..] = [];
-            let p = ln[bl[b].lfirst + k];
-            let e = piece_end(lines, p);
-            row2.append(lines[p.line][p.from..e]);
-            split_cells(cells2, row2[..]);
-            emit_row(out, cells2, aligns, "td", o, st);
-            k += 1;
-        }
-        out.append("</tbody>\n");
-    }
-    out.append("</table>\n");
-}
 
-// attr_name_ok holds for an attribute name of the form letter, `_` or
-// `:` first, then letters, digits and `:`, `.`, `_`, `-`. The rule is
-// the one of goldmark. It keeps a quote or `>` out of the open tag. A
-// name that starts with "on" is an event handler, so it never passes.
-fn attr_name_ok(n: const u8[:]) -> bool {
-    if n.len == 0 { return false; }
-    if n.len >= 2 && (n[0] == 'o' || n[0] == 'O') && (n[1] == 'n' || n[1] == 'N') { return false; }
-    var i: i64 = 0;
-    while i < n.len {
-        let c = n[i];
-        let first = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':';
-        if !(first || (i > 0 && (is_alnum(c) || c == '.' || c == '-'))) { return false; }
-        i += 1;
-    }
-    return true;
-}
 
-// head_attrs reads a trailing {#id .class name=value} block off a heading
-// text. It gives the end of the text before the block and fills the id,
-// the classes (space joined) and the other attributes (ready to write).
-// It gives -1 when no valid block ends the text.
-fn head_attrs(t: const u8[:], id: u8[>..]&, cls: u8[>..]&, extra: u8[>..]&) -> i64 {
-    var e = t.len;
-    while e > 0 && t[e - 1] == ' ' { e -= 1; }
-    if e == 0 || t[e - 1] != '}' { return -1; }
-    var o = e - 1;
-    while o >= 0 && t[o] != '{' { o -= 1; }
-    if o < 0 || (o > 0 && t[o - 1] != ' ') { return -1; }
-    let inner = t[o + 1..e - 1];
-    var k: i64 = 0;
-    var got = false;
-    while k < inner.len {
-        if inner[k] == ' ' { k += 1; continue; }
-        var j = k;
-        while j < inner.len && inner[j] != ' ' && inner[j] != '=' { j += 1; }
-        if j < inner.len && inner[j] == '=' {
-            let name = inner[k..j];
-            if !attr_name_ok(name) { return -1; }
-            var v = j + 1;
-            var ve = v;
-            var next_k: i64;
-            if v < inner.len && inner[v] == '"' {
-                v += 1;
-                ve = v;
-                while ve < inner.len && inner[ve] != '"' { ve += 1; }
-                if ve >= inner.len { return -1; }
-                next_k = ve + 1;
-            } else {
-                while ve < inner.len && inner[ve] != ' ' { ve += 1; }
-                next_k = ve;
-            }
-            extra.append(" ");
-            extra.append(name);
-            extra.append("=\"");
-            escape_attr(extra, inner[v..ve]);
-            extra.append("\"");
-            k = next_k;
-        } else if inner[k] == '#' && j > k + 1 {
-            id.clear();
-            escape_attr(id, inner[k + 1..j]);
-            k = j;
-        } else if inner[k] == '.' && j > k + 1 {
-            if cls.len > 0 { cls.append(" "); }
-            escape_attr(cls, inner[k + 1..j]);
-            k = j;
-        } else { return -1; }
-        got = true;
-    }
-    if !got { return -1; }
-    var te = o;
-    while te > 0 && t[te - 1] == ' ' { te -= 1; }
-    return te;
-}
 
 // render_leaf writes one leaf block.
 fn render_leaf(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, ids: u8[>..]&, o: Options, st: State&, b: i64) {
@@ -523,91 +351,10 @@ fn exit_block(out: u8[>..]&, bl: Blk[>..]&, b: i64) {
     }
 }
 
-// def_line holds when piece k of the paragraph c starts with a colon and
-// a space.
-fn def_line(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64, k: i64) -> bool {
-    let p = ln[bl[c].lfirst + k];
-    let e = piece_end(lines, p);
-    return e - p.from >= 2 && lines[p.line][p.from] == ':' && lines[p.line][p.from + 1] == ' ';
-}
 
-// is_def_para holds for a paragraph whose first line is a definition.
-fn is_def_para(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64) -> bool {
-    if c < 0 || bl[c].kind != B_PARA || bl[c].lcount == 0 { return false; }
-    return def_line(lines, bl, ln, c, 0);
-}
 
-// is_term_def holds for a paragraph whose second line is a definition.
-// The first line is the term, and no blank line sits between them.
-fn is_term_def(lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, c: i64) -> bool {
-    if c < 0 || bl[c].kind != B_PARA || bl[c].lcount < 2 { return false; }
-    return !def_line(lines, bl, ln, c, 0) && def_line(lines, bl, ln, c, 1);
-}
 
-// emit_dds writes one dd for each definition line of the paragraph c,
-// from piece first on. A line without the colon continues the dd above.
-// A tight dd writes the text with no paragraph, as goldmark and
-// Python-Markdown do when no blank line sits before the colon.
-fn emit_dds(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, o: Options, st: State&, c: i64, first: i64, tight: bool) {
-    var k = first;
-    while k < bl[c].lcount {
-        var t: u8[>..] = [];
-        var j = k;
-        while j < bl[c].lcount && (j == k || !def_line(lines, bl, ln, c, j)) {
-            let p = ln[bl[c].lfirst + j];
-            var from = p.from;
-            if j == k {
-                from += 1;
-                let e0 = piece_end(lines, p);
-                while from < e0 && lines[p.line][from] == ' ' { from += 1; }
-            } else {
-                t.push('\n');
-            }
-            t.append(lines[p.line][from..piece_end(lines, p)]);
-            j += 1;
-        }
-        if tight {
-            out.append("<dd>");
-            render_inline(out, t[..], o, st);
-            out.append("</dd>\n");
-        } else {
-            out.append("<dd>\n<p>");
-            render_inline(out, t[..], o, st);
-            out.append("</p>\n</dd>\n");
-        }
-        k = j;
-    }
-}
 
-// render_deflist writes the definition list that starts at the term c.
-// It gives the next block after the list.
-fn render_deflist(out: u8[>..]&, lines: const u8[:][>..]&, bl: Blk[>..]&, ln: Ln[>..]&, o: Options, st: State&, c: i64) -> i64 {
-    cr(out);
-    out.append("<dl>\n");
-    var term = c;
-    while term >= 0 && (is_term_def(lines, bl, ln, term)
-          || (bl[term].kind == B_PARA && !is_def_para(lines, bl, ln, term)
-              && is_def_para(lines, bl, ln, bl[term].next))) {
-        out.append("<dt>");
-        var t: u8[>..] = [];
-        var d = bl[term].next;
-        if is_term_def(lines, bl, ln, term) {
-            t.append(lines[ln[bl[term].lfirst].line][ln[bl[term].lfirst].from..piece_end(lines, ln[bl[term].lfirst])]);
-        } else {
-            leaf_join(t, lines, bl, ln, term);
-        }
-        render_inline(out, t[..], o, st);
-        out.append("</dt>\n");
-        if is_term_def(lines, bl, ln, term) { emit_dds(out, lines, bl, ln, o, st, term, 1, true); }
-        while is_def_para(lines, bl, ln, d) {
-            emit_dds(out, lines, bl, ln, o, st, d, 0, false);
-            d = bl[d].next;
-        }
-        term = d;
-    }
-    out.append("</dl>\n");
-    return term;
-}
 
 // walk renders the children of the block root. The root itself writes
 // no tags, so the document and a footnote body share the same walk.
